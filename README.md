@@ -2,6 +2,8 @@
 
 Удалённый read-only MCP-сервер для Hubstaff Time Tracking API v2 и Hubstaff Tasks API v1. Он предоставляет задачи, свежие изменения, комментарии и агрегированное время по задачам через Streamable HTTP.
 
+Сервер включает встроенный OAuth 2.1 authorization server для ChatGPT Developer mode: DCR, authorization code, PKCE S256, audience-bound JWT access tokens и ротируемые refresh tokens.
+
 ## MCP tools
 
 - `hubstaff_list_organizations` — доступные организации и их ID.
@@ -20,7 +22,8 @@
 
 1. Скопируйте `.env.example` в `.env`.
 2. Укажите `MCP_AUTH_TOKEN` длиной не менее 32 символов.
-3. Выберите один вариант авторизации Hubstaff:
+3. Для ChatGPT укажите `OAUTH_ISSUER`, `OAUTH_USERNAME`, `OAUTH_PASSWORD` и `OAUTH_SIGNING_SECRET`. OAuth-состояние сохраняется в `/data/oauth-state.json`.
+4. Выберите один вариант авторизации Hubstaff:
 
    - `HUBSTAFF_ORGANIZATION_TOKEN` (`hsoat_...`) — рекомендуемый вариант для постоянно работающего сервера;
    - `HUBSTAFF_REFRESH_TOKEN` — Personal Access Token, который Hubstaff выдаёт как refresh token;
@@ -51,11 +54,19 @@ URL:
 https://hubstuff-mcp.copperdiver.studio/mcp
 ```
 
-Заголовок:
+Для обычного MCP-клиента можно использовать служебный заголовок:
 
 ```text
 Authorization: Bearer <MCP_AUTH_TOKEN>
 ```
+
+ChatGPT подключается по OAuth автоматически. Сервер публикует:
+
+- `/.well-known/oauth-protected-resource`
+- `/.well-known/oauth-authorization-server`
+- `/oauth/register`, `/oauth/authorize`, `/oauth/token`
+
+В ChatGPT включите **Settings → Security and login → Developer mode**, затем на странице Plugins добавьте URL `https://hubstuff-mcp.copperdiver.studio/mcp` с OAuth/DCR. Во время первого подключения введите `OAUTH_USERNAME` и `OAUTH_PASSWORD` из серверного `.env`.
 
 Проверка доступности без секрета:
 

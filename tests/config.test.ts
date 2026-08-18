@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hasHubstaffCredentials, loadConfig } from "../src/config.js";
+import { hasHubstaffCredentials, hasOAuth, loadConfig } from "../src/config.js";
 
 describe("loadConfig", () => {
   it("loads safe defaults without requiring Hubstaff credentials at startup", () => {
@@ -16,5 +16,17 @@ describe("loadConfig", () => {
   it("recognizes an organization token", () => {
     const config = loadConfig({ HUBSTAFF_ORGANIZATION_TOKEN: "hsoat_test" });
     expect(hasHubstaffCredentials(config)).toBe(true);
+  });
+
+  it("requires a complete, strong OAuth configuration", () => {
+    expect(() => loadConfig({ OAUTH_ISSUER: "https://mcp.example.com" })).toThrow(/OAuth requires/);
+    const config = loadConfig({
+      OAUTH_ISSUER: "https://mcp.example.com",
+      OAUTH_USERNAME: "owner",
+      OAUTH_PASSWORD: "a-strong-password-123",
+      OAUTH_SIGNING_SECRET: "a-signing-secret-with-at-least-32-characters",
+    });
+    expect(hasOAuth(config)).toBe(true);
+    expect(config.oauthResource).toBe("https://mcp.example.com/mcp");
   });
 });

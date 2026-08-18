@@ -13,6 +13,7 @@ services:
       NODE_ENV: production
       PORT: 3000
       TOKEN_CACHE_PATH: /data/token.json
+      OAUTH_STATE_PATH: /data/oauth-state.json
     expose:
       - "3000"
     volumes:

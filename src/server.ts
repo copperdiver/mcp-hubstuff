@@ -3,9 +3,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 import type { Config } from "./config.js";
-import { hasHubstaffCredentials } from "./config.js";
+import { hasHubstaffCredentials, hasOAuth } from "./config.js";
 import { HubstaffClient } from "./hubstaff-client.js";
 import { registerTools } from "./tools.js";
+import { OAuthService, oauthMiddleware } from "./oauth.js";
 
 function bearerMatches(request: Request, expected: string): boolean {
   const authorization = request.header("authorization") ?? "";
@@ -26,9 +27,14 @@ export function createHttpApp(config: Config) {
   const client = new HubstaffClient(config);
   app.disable("x-powered-by");
   app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ extended: false, limit: "64kb" }));
+
+  const oauth = hasOAuth(config) ? new OAuthService(config) : undefined;
+  const authenticateOAuth = oauth ? oauthMiddleware(oauth, config.mcpAuthToken) : undefined;
+  if (oauth) app.use(oauth.router());
 
   app.get("/health", (_request, response) => {
-    response.json({ status: "ok", hubstaff_configured: hasHubstaffCredentials(config) });
+    response.json({ status: "ok", hubstaff_configured: hasHubstaffCredentials(config), oauth_configured: Boolean(oauth) });
   });
 
   app.get("/", (_request, response) => {
@@ -36,6 +42,10 @@ export function createHttpApp(config: Config) {
   });
 
   app.use("/mcp", (request: Request, response: Response, next: NextFunction) => {
+    if (authenticateOAuth) {
+      authenticateOAuth(request, response, next).catch(next);
+      return;
+    }
     if (!config.mcpAuthToken) {
       response.status(503).json({ error: "MCP_AUTH_TOKEN is not configured" });
       return;

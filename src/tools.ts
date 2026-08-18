@@ -5,6 +5,7 @@ import { HubstaffApiError, HubstaffClient, nextPageStartId, type Query } from ".
 type JsonObject = Record<string, unknown>;
 
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
+const oauthSecurity = [{ type: "oauth2" as const, scopes: ["hubstaff.read"] }];
 
 function result(data: unknown) {
   return {
@@ -53,6 +54,7 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
       description: "Lists organizations visible to the configured Hubstaff credential. Use this to discover organization_id.",
       inputSchema: { page_limit: z.number().int().min(1).max(100).default(100) },
       annotations: readOnly,
+      _meta: { securitySchemes: oauthSecurity },
     },
     async ({ page_limit }) => result(await client.get("/v2/organizations", { page_limit })),
   );
@@ -70,6 +72,7 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
         max_items: z.number().int().min(1).max(1000).default(200),
       },
       annotations: readOnly,
+      _meta: { securitySchemes: oauthSecurity },
     },
     async ({ organization_id, status, project_ids, user_ids, max_items }) => {
       const tasks = await collectPages(
@@ -90,6 +93,7 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
       description: "Returns the full Hubstaff time-tracking task record by task ID.",
       inputSchema: { task_id: z.number().int().positive() },
       annotations: readOnly,
+      _meta: { securitySchemes: oauthSecurity },
     },
     async ({ task_id }) => result(await client.get(`/v2/tasks/${task_id}`)),
   );
@@ -107,6 +111,7 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
         max_items: z.number().int().min(1).max(1000).default(200),
       },
       annotations: readOnly,
+      _meta: { securitySchemes: oauthSecurity },
     },
     async ({ organization_id, since, until, include_time_updates, max_items }) => {
       const stop = until ?? new Date().toISOString();
@@ -151,6 +156,7 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
         max_entries: z.number().int().min(1).max(10000).default(5000),
       },
       annotations: readOnly,
+      _meta: { securitySchemes: oauthSecurity },
     },
     async ({ organization_id, task_id, start, stop, max_entries }) => {
       const startMs = Date.parse(start);
@@ -205,6 +211,7 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
       description: "Lists project boards from the Hubstaff Tasks API v1.",
       inputSchema: {},
       annotations: readOnly,
+      _meta: { securitySchemes: oauthSecurity },
     },
     async () => result(await client.get("/v1/tasks/projects")),
   );
@@ -216,6 +223,7 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
       description: "Lists tasks in a Hubstaff Tasks project board.",
       inputSchema: { project_id: z.string().min(1) },
       annotations: readOnly,
+      _meta: { securitySchemes: oauthSecurity },
     },
     async ({ project_id }) => result(await client.get(`/v1/tasks/projects/${encodeURIComponent(project_id)}/tasks`)),
   );
@@ -227,6 +235,7 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
       description: "Returns a task from the Hubstaff Tasks API v1, including any embedded history or comments.",
       inputSchema: { task_id: z.string().min(1) },
       annotations: readOnly,
+      _meta: { securitySchemes: oauthSecurity },
     },
     async ({ task_id }) => result(await client.get(`/v1/tasks/tasks/${encodeURIComponent(task_id)}`)),
   );
@@ -238,6 +247,7 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
       description: "Lists comments for a Hubstaff Tasks board task. Availability depends on the Tasks API plan and token scope.",
       inputSchema: { task_id: z.string().min(1) },
       annotations: readOnly,
+      _meta: { securitySchemes: oauthSecurity },
     },
     async ({ task_id }) => {
       const encoded = encodeURIComponent(task_id);

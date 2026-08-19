@@ -88,7 +88,7 @@ input{box-sizing:border-box;width:100%;padding:12px;border:1px solid #aab7c4;bor
 .error{color:#a61b1b;background:#fff1f1;padding:10px;border-radius:8px}.actions{display:flex;gap:10px;margin-top:24px}
 button{border:0;border-radius:8px;padding:12px 18px;font-weight:700;cursor:pointer}.approve{background:#1769e0;color:#fff}.cancel{background:#e9eef3;color:#263442}
 </style></head><body><main><h1>Authorize Hubstaff MCP</h1>
-<p><strong>${htmlEscape(clientName)}</strong> requests read-only access to Hubstaff tasks, comments, updates, and tracked hours.</p>
+<p><strong>${htmlEscape(clientName)}</strong> requests read-only access to Hubstaff tasks, updates, tracked hours, and available audit events.</p>
 ${error ? `<p class="error">${htmlEscape(error)}</p>` : ""}
 <form method="post" action="/oauth/authorize"><input type="hidden" name="pending_id" value="${htmlEscape(pendingId)}">
 <label for="username">Username</label><input id="username" name="username" autocomplete="username" required>

@@ -1,0 +1,37 @@
+name: hubstaff-mcp
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hubstaff-mcp
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      TOKEN_CACHE_PATH: /data/token.json
+      OAUTH_STATE_PATH: /data/oauth-state.json
+    expose:
+      - "3000"
+    volumes:
+      - token_data:/data
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.hubstaff-mcp.rule=Host(`hubstuff-mcp.copperdiver.studio`)"
+      - "traefik.http.routers.hubstaff-mcp.entrypoints=websecure"
+      - "traefik.http.routers.hubstaff-mcp.tls=true"
+      - "traefik.http.routers.hubstaff-mcp.tls.certresolver=le"
+      - "traefik.http.services.hubstaff-mcp.loadbalancer.server.port=3000"
+
+networks:
+  proxy:
+    external: true
+
+volumes:
+  token_data:

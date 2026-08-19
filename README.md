@@ -1,23 +1,23 @@
 # Hubstaff MCP Server
 
-> Задачи, комментарии, изменения и фактически потраченные часы из Hubstaff — прямо в ChatGPT и любом MCP-клиенте.
+> Задачи, изменения, источники и фактически потраченные часы из Hubstaff — прямо в ChatGPT и любом MCP-клиенте.
 
 [![MCP](https://img.shields.io/badge/MCP-Streamable_HTTP-5b5bd6)](https://modelcontextprotocol.io/)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ed?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Read only](https://img.shields.io/badge/tools-read--only-16803a)](#безопасность)
 
-Hubstaff MCP объединяет **Hubstaff Time Tracking API v2** и **Hubstaff Tasks API v1** в одном удалённом MCP-сервере. Вместо ручных отчётов можно спросить:
+Hubstaff MCP подключает официальный **Hubstaff API v2** к ChatGPT и другим MCP-клиентам. Вместо ручных отчётов можно спросить:
 
 - «Сколько часов команда потратила на эту задачу за неделю?»
 - «Какие задачи и записи времени изменились сегодня?»
-- «Покажи активные задачи проекта и последние комментарии».
+- «Покажи активные задачи проекта и из какой системы они синхронизированы».
 
 Сервер готов для ChatGPT Developer mode: встроены OAuth 2.1, Dynamic Client Registration, Authorization Code + PKCE S256, короткоживущие JWT access tokens и ротируемые refresh tokens. Все MCP-инструменты работают только на чтение.
 
 ## Почему этот сервер
 
-- **Один диалог вместо нескольких отчётов.** Задачи, доски, комментарии и время доступны через единый набор инструментов.
+- **Один диалог вместо нескольких отчётов.** Задачи, изменения, источники и время доступны через единый набор инструментов.
 - **ChatGPT подключается по OAuth.** Не нужно передавать Hubstaff PAT в ChatGPT или другой MCP-клиент.
 - **Подходит для постоянной работы.** Сервер поддерживает Organization Token, PAT с безопасной ротацией и refresh token от Hubstaff OAuth application.
 - **Read-only по дизайну.** Инструменты не создают и не изменяют данные Hubstaff.
@@ -178,10 +178,10 @@ Authorization: Bearer <MCP_AUTH_TOKEN>
 
 ## Авторизация в Hubstaff
 
-Hubstaff официально поддерживает Organization Access Tokens, Personal Access Tokens и OAuth applications. Для чтения всех функций этого сервера PAT/OAuth credential должен включать scopes:
+Hubstaff официально поддерживает Organization Access Tokens, Personal Access Tokens и OAuth applications. Для чтения функций этого сервера PAT/OAuth credential должен включать scope:
 
 ```text
-hubstaff:read tasks:read
+hubstaff:read
 ```
 
 ### Вариант 1 — Organization Access Token
@@ -222,7 +222,7 @@ PAT подходит для личной интеграции, внутренн�
 Hubstaff Account → Personal access tokens
 ```
 
-Выберите scopes `hubstaff:read` и `tasks:read`, затем настройте:
+Выберите scope `hubstaff:read`, затем настройте:
 
 ```dotenv
 HUBSTAFF_AUTH_MODE=pat
@@ -289,15 +289,13 @@ HUBSTAFF_REFRESH_TOKEN=
 
 | Tool | Что возвращает |
 |---|---|
+| `hubstaff_capabilities` | Поддерживаемые источники данных и ограничения публичного API |
 | `hubstaff_list_organizations` | Доступные организации и их ID |
 | `hubstaff_list_tasks` | Задачи организации с фильтрами по status, project и user |
-| `hubstaff_get_task` | Полную карточку time-tracking задачи |
+| `hubstaff_get_task` | Карточку задачи и `project_type`, `integration_id`, `remote_id` исходной системы |
 | `hubstaff_recent_updates` | Недавно изменённые задачи и записи времени |
 | `hubstaff_task_hours` | Общее время по задаче и разбивку по пользователям |
-| `hubstaff_tasks_list_projects` | Проектные доски Hubstaff Tasks |
-| `hubstaff_tasks_list_project_tasks` | Задачи выбранной доски |
-| `hubstaff_tasks_get_task` | Подробности задачи Hubstaff Tasks |
-| `hubstaff_tasks_list_comments` | Комментарии или встроенную историю задачи |
+| `hubstaff_list_audit_log_entries` | События журнала аудита; требуется Enterprise и роль Owner/Manager |
 
 Все tools объявлены как `readOnly`, `non-destructive` и `idempotent`.
 
@@ -437,7 +435,8 @@ REQUEST_TIMEOUT_MS=30000
 - Activity API принимает интервал не более 7 дней за запрос; `hubstaff_task_hours` автоматически разбивает длинный период на части.
 - Диапазон `hubstaff_task_hours` ограничен 183 днями.
 - Детальная история активности зависит от доступного периода Hubstaff и тарифа организации.
-- Comments API относится к Hubstaff Tasks и может быть недоступен на некоторых тарифах. Tool сначала проверяет dedicated endpoint, затем ищет comments/history в данных задачи.
+- Публичный Hubstaff API v2 не предоставляет комментарии задач. Для интегрированной задачи используйте `project_type` и `remote_id`, чтобы обратиться к API исходной системы.
+- Audit Log API доступен только организациям на Enterprise и требует роль Owner или Organization Manager с разрешением просмотра данных других пользователей. Журнал аудита не содержит комментарии.
 - Доступ к организациям и проектам всегда ограничен правами пользователя или участника, которому принадлежит Hubstaff credential.
 
 ## Troubleshooting
@@ -462,9 +461,13 @@ Authorization request одноразовый и действует ограни�
 
 Проверьте, что вы используете веб-версию ChatGPT, включили **Developer mode**, ваш план поддерживает эту функцию, а workspace administrator разрешил developer-mode apps.
 
-### Комментарии задачи не возвращаются
+### Нужны комментарии задачи
 
-Убедитесь, что PAT/OAuth credential имеет scope `tasks:read`, пользователь видит проект, а тариф Hubstaff предоставляет comments/history через Tasks API.
+Публичный Hubstaff API v2 не имеет endpoint комментариев. Получите карточку через `hubstaff_get_task`, определите `project_type` и `remote_id`, затем используйте API исходной системы — например GitHub, Jira или Asana. Добавление `tasks:read` не создаёт отсутствующий endpoint.
+
+### Audit Log возвращает `403`
+
+Журнал аудита требует Hubstaff Enterprise, а credential должен действовать от имени Owner или Organization Manager с разрешением просмотра данных других пользователей.
 
 ### Проверка контейнера
 
@@ -498,6 +501,7 @@ npm run build
 - [Hubstaff authentication](https://developer.hubstaff.com/authentication/)
 - [Hubstaff tasks](https://developer.hubstaff.com/reference/tasks/)
 - [Hubstaff activities](https://developer.hubstaff.com/reference/activities/)
+- [Hubstaff audit log](https://developer.hubstaff.com/reference/audit_log_entries/)
 - [OpenAI ChatGPT Developer mode](https://developers.openai.com/api/docs/guides/developer-mode)
 - [OpenAI plugin authentication](https://developers.openai.com/plugins/build/auth)
 - [Model Context Protocol](https://modelcontextprotocol.io/)

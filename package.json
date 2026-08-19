@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Read-only remote MCP server for Hubstaff and Hubstaff Tasks",
+  "description": "Read-only remote MCP server for the official Hubstaff API v2",
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/index.ts",

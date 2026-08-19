@@ -1,42 +1,44 @@
 # Hubstaff MCP Server
 
-> Задачи, изменения, источники и фактически потраченные часы из Hubstaff — прямо в ChatGPT и любом MCP-клиенте.
+> Ask ChatGPT about Hubstaff tasks, recent changes, and actual time spent—without handing your Hubstaff credentials to ChatGPT.
 
 [![MCP](https://img.shields.io/badge/MCP-Streamable_HTTP-5b5bd6)](https://modelcontextprotocol.io/)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ed?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Read only](https://img.shields.io/badge/tools-read--only-16803a)](#безопасность)
+[![Read only](https://img.shields.io/badge/tools-read--only-16803a)](#security)
 
-Hubstaff MCP подключает официальный **Hubstaff API v2** к ChatGPT и другим MCP-клиентам. Вместо ручных отчётов можно спросить:
+Hubstaff MCP is a read-only bridge between the official Hubstaff API v2 and ChatGPT or any other MCP client. It turns task and time-tracking data into a conversational interface while keeping Hubstaff secrets on your own server.
 
-- «Сколько часов команда потратила на эту задачу за неделю?»
-- «Какие задачи и записи времени изменились сегодня?»
-- «Покажи активные задачи проекта и из какой системы они синхронизированы».
+Try questions such as:
 
-Сервер готов для ChatGPT Developer mode: встроены OAuth 2.1, Dynamic Client Registration, Authorization Code + PKCE S256, короткоживущие JWT access tokens и ротируемые refresh tokens. Все MCP-инструменты работают только на чтение.
+- “How many hours did the team spend on this task last week?”
+- “Which tasks and time records changed today?”
+- “Show active tasks for this project and identify where each task came from.”
+- “Break down the time on task 123 by team member.”
 
-## Почему этот сервер
+The server is ready for ChatGPT Developer mode and supports OAuth 2.1, Dynamic Client Registration, Authorization Code + PKCE S256, short-lived JWT access tokens, and rotating refresh tokens. Every MCP tool is read-only.
 
-- **Один диалог вместо нескольких отчётов.** Задачи, изменения, источники и время доступны через единый набор инструментов.
-- **ChatGPT подключается по OAuth.** Не нужно передавать Hubstaff PAT в ChatGPT или другой MCP-клиент.
-- **Подходит для постоянной работы.** Сервер поддерживает Organization Token, PAT с безопасной ротацией и refresh token от Hubstaff OAuth application.
-- **Read-only по дизайну.** Инструменты не создают и не изменяют данные Hubstaff.
-- **Секреты остаются на вашем сервере.** `.env` исключён из Git и Docker build context, а ротируемые токены сохраняются в защищённом Docker volume.
-- **Готов к контейнерному деплою.** Есть multi-stage Docker image, healthcheck, Docker Compose, Traefik labels и публикация в GHCR.
+## Why use it
 
-## Готовый endpoint
+- **Ask questions instead of assembling reports.** Tasks, updates, source metadata, and tracked time are available through one MCP connection.
+- **Keep Hubstaff credentials off the client.** ChatGPT authenticates to your MCP server, not directly to Hubstaff.
+- **Choose the right Hubstaff credential.** Organization tokens, PATs, OAuth refresh tokens, and short-lived access tokens are all supported.
+- **Run it continuously.** Token rotation is persisted safely, and the project includes Docker, health checks, Traefik labels, and GHCR publishing.
+- **Stay read-only.** The server does not create, update, or delete Hubstaff data.
+
+## Hosted endpoint
 
 ```text
 https://hubstuff-mcp.copperdiver.studio/mcp
 ```
 
-Healthcheck:
+Health check:
 
 ```bash
 curl https://hubstuff-mcp.copperdiver.studio/health
 ```
 
-Ответ настроенного сервера:
+Expected response:
 
 ```json
 {
@@ -46,83 +48,68 @@ curl https://hubstuff-mcp.copperdiver.studio/health
 }
 ```
 
-## Как проходит авторизация
+The health endpoint never returns secrets.
 
-У сервера две независимые границы безопасности. Их важно не путать:
+## How authentication works
+
+There are two separate trust boundaries. Keeping them separate prevents most configuration mistakes.
 
 ```mermaid
 flowchart LR
-    C[ChatGPT или MCP-клиент]
-    M[Hubstaff MCP Server]
-    H[Hubstaff API]
-    V[(Docker volume /data)]
+    Client[ChatGPT or MCP client]
+    Server[Hubstaff MCP server]
+    Hubstaff[Hubstaff API v2]
 
-    C -->|OAuth 2.1 / MCP bearer token| M
-    M -->|Organization Token / PAT / Hubstaff OAuth / access token| H
-    M -->|rotated tokens and OAuth state| V
+    Client -->|OAuth 2.1 token or MCP_AUTH_TOKEN| Server
+    Server -->|Organization token, PAT/OAuth access token, or temporary access token| Hubstaff
 ```
 
-1. **MCP-клиент → MCP-сервер.** Определяет, кто может вызывать ваши MCP tools.
-2. **MCP-сервер → Hubstaff.** Определяет, какие организации и данные Hubstaff увидит сервер.
+1. **MCP client → this server** controls who may call the MCP tools.
+2. **This server → Hubstaff** controls which Hubstaff data those tools can read.
 
-ChatGPT никогда не получает `HUBSTAFF_*` credentials. Он получает только ограниченный токен вашего MCP-сервера.
+ChatGPT never receives `HUBSTAFF_*` credentials. It receives only a token issued or accepted by this MCP server.
 
-## Быстрый выбор авторизации
+## Authentication at a glance
 
-### Доступ клиента к MCP
-
-| Сценарий | Способ | Переменные |
+| Connection | Best option | Configuration |
 |---|---|---|
-| ChatGPT Developer mode | **Встроенный OAuth 2.1 + DCR** — рекомендуется | `OAUTH_*` |
-| Скрипт, серверный агент или MCP-клиент с custom headers | **Статический bearer token** | `MCP_AUTH_TOKEN` |
+| ChatGPT → MCP | OAuth 2.1 with DCR and PKCE | `OAUTH_*` |
+| Traditional MCP client → MCP | Static bearer token | `MCP_AUTH_TOKEN` |
+| MCP → one Hubstaff organization | Organization Access Token | `HUBSTAFF_ORGANIZATION_TOKEN` |
+| MCP → a personal Hubstaff account | Personal Access Token | `HUBSTAFF_AUTH_MODE=pat`, `HUBSTAFF_REFRESH_TOKEN` |
+| MCP → Hubstaff OAuth application | OAuth refresh token | `HUBSTAFF_AUTH_MODE=oauth`, refresh token, client ID, and client secret |
+| MCP → Hubstaff for a short test | Existing access token | `HUBSTAFF_ACCESS_TOKEN` |
 
-### Доступ MCP к Hubstaff
+Configure one primary Hubstaff authentication method. If `HUBSTAFF_ORGANIZATION_TOKEN` is present, it takes precedence over access and refresh tokens.
 
-| Сценарий | Способ | Переменные |
-|---|---|---|
-| Постоянный сервер одной организации | **Organization Access Token** — рекомендуется | `HUBSTAFF_ORGANIZATION_TOKEN` |
-| Личный или внутренний сервер | **Personal Access Token (PAT)** | `HUBSTAFF_AUTH_MODE=pat`, `HUBSTAFF_REFRESH_TOKEN` |
-| OAuth application с уже полученным refresh token | **Hubstaff OAuth refresh** | `HUBSTAFF_AUTH_MODE=oauth`, `HUBSTAFF_REFRESH_TOKEN`, `HUBSTAFF_CLIENT_ID`, `HUBSTAFF_CLIENT_SECRET` |
-| Короткий тест или отладка | **Готовый access token** | `HUBSTAFF_ACCESS_TOKEN` |
+## Authenticate MCP clients
 
-Настраивайте ровно один основной способ доступа к Hubstaff. Если задан `HUBSTAFF_ORGANIZATION_TOKEN`, он имеет приоритет.
+### Option A: OAuth 2.1 for ChatGPT
 
-## Авторизация MCP-клиентов
+This is the recommended setup for ChatGPT Work and ChatGPT Developer mode. The built-in authorization server provides:
 
-### Вариант A — OAuth 2.1 для ChatGPT
-
-Это рекомендуемый способ подключения ChatGPT. Сервер поддерживает:
-
-- OAuth protected resource metadata;
-- OAuth authorization server metadata;
-- Dynamic Client Registration (DCR);
+- OAuth discovery metadata;
+- Dynamic Client Registration;
 - Authorization Code flow;
 - PKCE S256;
-- проверку `issuer`, `audience`, срока действия и scope;
-- ротируемые refresh tokens;
-- callback-specific и stable redirect URI ChatGPT.
+- audience-bound JWT access tokens;
+- rotating refresh grants;
+- issuer, audience, expiry, and scope validation.
 
-Минимальная конфигурация:
+Configure the public HTTPS origin and a dedicated login for the MCP authorization page:
 
 ```dotenv
-OAUTH_ISSUER=https://mcp.example.com
-OAUTH_RESOURCE=https://mcp.example.com/mcp
+OAUTH_ISSUER=https://hubstuff-mcp.copperdiver.studio
+OAUTH_RESOURCE=https://hubstuff-mcp.copperdiver.studio/mcp
 OAUTH_USERNAME=admin
 OAUTH_PASSWORD=replace_with_at_least_16_random_characters
 OAUTH_SIGNING_SECRET=replace_with_at_least_32_random_characters
 OAUTH_STATE_PATH=/data/oauth-state.json
 ```
 
-`OAUTH_USERNAME` и `OAUTH_PASSWORD` — логин владельца MCP, а не учётная запись Hubstaff. Текущая встроенная реализация рассчитана на один общий MCP-логин. После успешного входа ChatGPT получает scope `hubstaff.read`.
+`OAUTH_USERNAME` and `OAUTH_PASSWORD` protect this MCP server. They are not Hubstaff account credentials. The current implementation uses one shared MCP login, which is appropriate for a private deployment but not a multi-tenant public service.
 
-Создать безопасные секреты можно так:
-
-```bash
-openssl rand -hex 24   # OAUTH_PASSWORD
-openssl rand -hex 48   # OAUTH_SIGNING_SECRET
-```
-
-Discovery endpoints:
+The server publishes:
 
 ```text
 /.well-known/oauth-protected-resource
@@ -133,68 +120,41 @@ Discovery endpoints:
 /oauth/token
 ```
 
-#### Подключение в ChatGPT
+### Option B: static bearer token
 
-1. В веб-версии ChatGPT откройте **Settings → Security and login**.
-2. Включите **Developer mode**.
-3. Откройте [ChatGPT Plugins](https://chatgpt.com/plugins), нажмите `+` и создайте developer-mode app.
-4. Укажите MCP URL: `https://mcp.example.com/mcp`.
-5. Выберите **OAuth** и **Dynamic Client Registration (DCR)**. Client ID и Client Secret не требуются.
-6. На странице авторизации введите `OAUTH_USERNAME` и `OAUTH_PASSWORD`.
-7. После подключения обновите список tools и включите нужные инструменты в чате.
-
-ChatGPT поддерживает Streamable HTTP, OAuth и DCR в Developer mode. Подробности: [OpenAI Developer mode](https://developers.openai.com/api/docs/guides/developer-mode) и [OAuth authentication](https://developers.openai.com/plugins/build/auth).
-
-### Вариант B — статический MCP bearer token
-
-Подходит для клиентов, умеющих отправлять собственный HTTP header:
+For scripts, internal agents, or MCP clients that can send a fixed authorization header:
 
 ```dotenv
 MCP_AUTH_TOKEN=replace_with_at_least_32_random_characters
 ```
 
-Запросы должны содержать:
+Send it as:
 
 ```http
 Authorization: Bearer <MCP_AUTH_TOKEN>
 ```
 
-Пример общей конфигурации MCP-клиента:
+OAuth and `MCP_AUTH_TOKEN` may be enabled at the same time. If neither is configured, `/mcp` returns a configuration error rather than exposing an unprotected endpoint.
 
-```json
-{
-  "mcpServers": {
-    "hubstaff": {
-      "url": "https://mcp.example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer ${MCP_AUTH_TOKEN}"
-      }
-    }
-  }
-}
-```
+## Authenticate with Hubstaff
 
-Если OAuth и `MCP_AUTH_TOKEN` настроены одновременно, сервер принимает оба способа. Если не настроен ни один, публичный `/mcp` не запускается без защиты и отвечает ошибкой конфигурации.
-
-## Авторизация в Hubstaff
-
-Hubstaff официально поддерживает Organization Access Tokens, Personal Access Tokens и OAuth applications. Для чтения функций этого сервера PAT/OAuth credential должен включать scope:
+The supported Hubstaff features use the official API v2. PAT and OAuth credentials need the following scope:
 
 ```text
 hubstaff:read
 ```
 
-### Вариант 1 — Organization Access Token
+### Option 1: Organization Access Token
 
-**Лучший выбор для production-сервера одной организации.** Это долгоживущий bearer token с префиксом `hsoat_`, который не требует browser flow или refresh exchange.
+**Recommended for a long-running service dedicated to one organization.** An Organization Access Token is a long-lived bearer token prefixed with `hsoat_`. It does not require a browser flow or token exchange.
 
-Создать токен может owner, manager или участник с правом Manage IT:
+Create it in Hubstaff:
 
 ```text
-Hubstaff → Settings → Organization → API tokens
+Settings → Organization → API tokens
 ```
 
-Токен работает от имени назначенного участника и наследует его текущие права в организации.
+Assign the token to a member with access to the data the server should expose, then configure:
 
 ```dotenv
 HUBSTAFF_ORGANIZATION_TOKEN=hsoat_replace_me
@@ -205,24 +165,24 @@ HUBSTAFF_CLIENT_ID=
 HUBSTAFF_CLIENT_SECRET=
 ```
 
-Преимущества:
+Why choose it:
 
-- нет ротации refresh token;
-- можно назначить или переназначить ответственного участника;
-- можно выбрать срок 30, 60, 90 дней или `Never`;
-- хорошо подходит для shared automation и постоянно работающего сервера.
+- no refresh-token rotation;
+- the acting organization member can be reassigned;
+- expiration can be set to 30, 60, or 90 days, or never;
+- well suited to shared automation and always-on services.
 
-### Вариант 2 — Personal Access Token (PAT)
+### Option 2: Personal Access Token
 
-PAT подходит для личной интеграции, внутреннего инструмента или CI. Важная особенность Hubstaff: строка, показанная при создании PAT, является **refresh token**, а не готовым access token.
+A PAT is a good fit for a personal integration, internal service, or CI job. Hubstaff displays one value when the PAT is created: that value is a **refresh token**, not an access token.
 
-Создайте PAT в:
+Create a PAT under:
 
 ```text
 Hubstaff Account → Personal access tokens
 ```
 
-Выберите scope `hubstaff:read`, затем настройте:
+Select `hubstaff:read`, then configure:
 
 ```dotenv
 HUBSTAFF_AUTH_MODE=pat
@@ -234,22 +194,15 @@ HUBSTAFF_CLIENT_ID=
 HUBSTAFF_CLIENT_SECRET=
 ```
 
-Не привязывайте PAT к DPoP key: текущая версия сервера использует обычный Bearer flow и не генерирует DPoP proof для каждого запроса.
+The server exchanges the PAT for a short-lived access token, reuses that token until it is close to expiry, refreshes it when necessary, and atomically stores the rotated token pair under `TOKEN_CACHE_PATH`.
 
-Сервер автоматически:
+Do not share the same PAT between multiple applications. Each refresh rotates the token, so another consumer may invalidate the value this server expects.
 
-1. обменяет PAT на короткоживущий access token;
-2. переиспользует access token до истечения срока;
-3. сохранит новую пару access/refresh tokens в `/data/token.json`;
-4. атомарно заменит файл после следующей ротации.
+Do not bind the PAT to DPoP. This server currently uses bearer tokens and does not generate a fresh DPoP proof for every request.
 
-Не используйте один PAT одновременно в нескольких приложениях: Hubstaff ротирует refresh token, и приложения будут инвалидировать credentials друг друга.
+### Option 3: Hubstaff OAuth application
 
-> После первого обмена исходный PAT в `.env` может стать неактуальным. Не удаляйте volume с `/data/token.json`, пока не готовы выпустить новый PAT.
-
-### Вариант 3 — Hubstaff OAuth application
-
-Этот режим нужен, если вы зарегистрировали OAuth application в Hubstaff и уже получили refresh token через Authorization Code flow.
+Use this mode when you already have a Hubstaff OAuth application and refresh token:
 
 ```dotenv
 HUBSTAFF_AUTH_MODE=oauth
@@ -261,18 +214,11 @@ HUBSTAFF_ORGANIZATION_TOKEN=
 HUBSTAFF_ACCESS_TOKEN=
 ```
 
-Сервер использует HTTP Basic с `client_id:client_secret` при обновлении токена и сохраняет ротируемые credentials в `/data/token.json`.
+The client ID and secret belong to Hubstaff. They are unrelated to the OAuth server that protects this MCP endpoint.
 
-Этот проект не предоставляет отдельный callback UI для первоначального Hubstaff consent flow. Сначала получите authorization code и refresh token через вашу Hubstaff OAuth application, затем передайте refresh token серверу.
+### Option 4: existing access token
 
-Не путайте этот режим со встроенным `OAUTH_*` для ChatGPT:
-
-- `HUBSTAFF_CLIENT_ID` / `HUBSTAFF_CLIENT_SECRET` относятся к Hubstaff;
-- `OAUTH_ISSUER` / `OAUTH_USERNAME` / `OAUTH_PASSWORD` защищают MCP от неавторизованных клиентов.
-
-### Вариант 4 — готовый Hubstaff access token
-
-Подходит только для короткого теста:
+For a short-lived test or debugging session:
 
 ```dotenv
 HUBSTAFF_ACCESS_TOKEN=replace_with_short_lived_access_token
@@ -281,107 +227,103 @@ HUBSTAFF_ORGANIZATION_TOKEN=
 HUBSTAFF_REFRESH_TOKEN=
 ```
 
-Сервер не сможет обновить такой токен без refresh token. После истечения срока Hubstaff начнёт отвечать `401`, поэтому для production используйте Organization Token, PAT или OAuth refresh mode.
+The server cannot refresh this token. Use an Organization Access Token or PAT for a permanent deployment.
 
-Полная схема Hubstaff authentication: [developer.hubstaff.com/authentication](https://developer.hubstaff.com/authentication/).
+## Connect ChatGPT Work
+
+1. Confirm the public endpoint uses HTTPS and `/health` reports `oauth_configured: true`.
+2. In ChatGPT, open **Settings → Security and login** and enable **Developer mode**.
+3. Open the custom apps or connectors page and add:
+
+   ```text
+   https://hubstuff-mcp.copperdiver.studio/mcp
+   ```
+
+4. Choose OAuth if ChatGPT asks for an authentication method.
+5. Complete the authorization page with the server's `OAUTH_USERNAME` and `OAUTH_PASSWORD`.
+6. Start a new conversation and ask ChatGPT to list Hubstaff organizations.
+
+If an authorization page expires, close it and start **Connect** or **Retry** again. Authorization requests are short-lived and single-use.
 
 ## MCP tools
 
-| Tool | Что возвращает |
+| Tool | Returns |
 |---|---|
-| `hubstaff_capabilities` | Поддерживаемые источники данных и ограничения публичного API |
-| `hubstaff_list_organizations` | Доступные организации и их ID |
-| `hubstaff_list_tasks` | Задачи организации с фильтрами по status, project и user |
-| `hubstaff_get_task` | Карточку задачи и `project_type`, `integration_id`, `remote_id` исходной системы |
-| `hubstaff_recent_updates` | Недавно изменённые задачи и записи времени |
-| `hubstaff_task_hours` | Общее время по задаче и разбивку по пользователям |
-| `hubstaff_list_audit_log_entries` | События журнала аудита; требуется Enterprise и роль Owner/Manager |
+| `hubstaff_capabilities` | Supported data sources, known API limits, and whether comments or audit history are available |
+| `hubstaff_list_organizations` | Organizations visible to the configured Hubstaff credential |
+| `hubstaff_list_tasks` | Organization tasks filtered by status, project, or assignee |
+| `hubstaff_get_task` | A full task record plus `project_type`, `integration_id`, and `remote_id` source metadata |
+| `hubstaff_recent_updates` | Recently changed tasks and optionally changed activity records |
+| `hubstaff_task_hours` | Total tracked time for a task and a per-user breakdown |
+| `hubstaff_list_audit_log_entries` | Organization audit events; requires Hubstaff Enterprise and elevated permissions |
 
-Все tools объявлены как `readOnly`, `non-destructive` и `idempotent`.
+All tools are declared read-only, non-destructive, and idempotent.
 
-## Быстрый старт
+## Quick start
 
-### 1. Запуск из исходников
+### Run from source
 
-Требования: Node.js 22+.
+Requirements: Node.js 22 or later.
 
 ```bash
 git clone https://github.com/copperdiver/mcp-hubstuff.git
 cd mcp-hubstuff
 cp .env.example .env
-```
-
-Заполните `.env`, затем:
-
-```bash
 npm ci
 npm run build
 npm test
 npm start
 ```
 
-Локальный endpoint:
+The service listens on port `3000` by default:
 
 ```text
 http://localhost:3000/mcp
+http://localhost:3000/health
 ```
 
-### 2. Запуск готового image из GHCR
+### Run the GHCR image
 
-Если package закрытый, сначала авторизуйтесь с GitHub token, имеющим permission `read:packages`. Для публичного package этот шаг не нужен:
+The image is published as:
+
+```text
+ghcr.io/copperdiver/mcp-hubstuff:latest
+```
+
+If the package is private, sign in with a GitHub token that has `read:packages`:
 
 ```bash
 echo "$GHCR_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+docker pull ghcr.io/copperdiver/mcp-hubstuff:latest
 ```
 
-```bash
-docker pull ghcr.io/copperdiver/mcp-hubstuff:latest
+Skip `docker login` if the package is public.
 
-docker run -d \
-  --name hubstaff-mcp \
-  --restart unless-stopped \
-  -p 3000:3000 \
+Run the container:
+
+```bash
+docker run --rm \
   --env-file .env \
+  -p 3000:3000 \
   -v hubstaff_mcp_data:/data \
   ghcr.io/copperdiver/mcp-hubstuff:latest
 ```
 
-Кроме `latest`, workflow публикует immutable tag `sha-<full-commit-sha>`.
+### Run with Docker Compose and Traefik
 
-### 3. Docker Compose + Traefik
-
-Скопируйте `.env.example` в `.env`, настройте домен в `compose.yml` и создайте внешнюю proxy network, если её ещё нет:
+The included `compose.yml` expects an external Docker network named `proxy` and a Traefik certificate resolver named `le`.
 
 ```bash
 docker network create proxy
 docker compose up -d --build
 ```
 
-Для production значения должны совпадать:
+Adjust the hostname and Traefik labels before deploying under a different domain.
+
+## Complete `.env` example
 
 ```dotenv
-OAUTH_ISSUER=https://mcp.example.com
-OAUTH_RESOURCE=https://mcp.example.com/mcp
-```
-
-Traefik должен завершать TLS, потому что публичный OAuth issuer обязан работать по HTTPS.
-
-## Полный пример `.env`
-
-Пример с ChatGPT OAuth и Hubstaff PAT:
-
-```dotenv
-# Client → MCP
-MCP_AUTH_TOKEN=replace_with_at_least_32_random_characters
-
-OAUTH_ISSUER=https://mcp.example.com
-OAUTH_RESOURCE=https://mcp.example.com/mcp
-OAUTH_USERNAME=admin
-OAUTH_PASSWORD=replace_with_at_least_16_random_characters
-OAUTH_SIGNING_SECRET=replace_with_at_least_32_random_characters
-OAUTH_STATE_PATH=/data/oauth-state.json
-
-# MCP → Hubstaff
+# Choose one Hubstaff authentication method.
 HUBSTAFF_AUTH_MODE=pat
 HUBSTAFF_REFRESH_TOKEN=replace_with_your_pat
 HUBSTAFF_ORGANIZATION_TOKEN=
@@ -389,7 +331,18 @@ HUBSTAFF_ACCESS_TOKEN=
 HUBSTAFF_CLIENT_ID=
 HUBSTAFF_CLIENT_SECRET=
 
-# Runtime
+# Client authentication for the MCP endpoint.
+MCP_AUTH_TOKEN=replace_with_at_least_32_random_characters
+
+# OAuth 2.1 for ChatGPT.
+OAUTH_ISSUER=https://hubstuff-mcp.copperdiver.studio
+OAUTH_RESOURCE=https://hubstuff-mcp.copperdiver.studio/mcp
+OAUTH_USERNAME=admin
+OAUTH_PASSWORD=replace_with_at_least_16_random_characters
+OAUTH_SIGNING_SECRET=replace_with_at_least_32_random_characters
+OAUTH_STATE_PATH=/data/oauth-state.json
+
+# Runtime and Hubstaff endpoints.
 PORT=3000
 HUBSTAFF_API_BASE=https://api.hubstaff.com
 HUBSTAFF_TOKEN_URL=https://account.hubstaff.com/access_tokens
@@ -397,79 +350,73 @@ TOKEN_CACHE_PATH=/data/token.json
 REQUEST_TIMEOUT_MS=30000
 ```
 
-## Хранение данных и секретов
+Never commit `.env`. The repository excludes it from Git and from the Docker build context.
 
-В `/data` находятся два runtime-файла:
+## Persistent data
 
-| Файл | Содержимое |
+Two files must survive container recreation:
+
+| Path | Purpose |
 |---|---|
-| `/data/token.json` | Текущий Hubstaff access token, rotated refresh token и expiry |
-| `/data/oauth-state.json` | DCR clients, authorization codes и refresh grants MCP OAuth |
+| `/data/token.json` | Current Hubstaff access token, rotated refresh token, and expiry time |
+| `/data/oauth-state.json` | Registered OAuth clients, authorization codes, and MCP refresh grants |
 
-Оба файла создаются с правами `0600`. Каталог `/data` должен быть постоянным Docker volume.
+The included Compose configuration mounts a named volume at `/data`.
 
-Никогда не публикуйте:
+## Security
 
-- `.env`;
-- `/data/token.json`;
-- `/data/oauth-state.json`;
-- значения `MCP_AUTH_TOKEN`, `OAUTH_PASSWORD`, `OAUTH_SIGNING_SECRET` или `HUBSTAFF_*TOKEN`.
+- All MCP tools are read-only.
+- The public MCP endpoint requires OAuth, a static bearer token, or both.
+- MCP access tokens are checked for issuer, audience, expiry, and scope.
+- PKCE S256 protects the authorization-code exchange.
+- OAuth callback URLs are restricted to trusted HTTPS callbacks and approved local development URLs.
+- Secret values are never returned by `/health`.
+- `.env`, OAuth state, and token-cache files must never be committed.
+- Secrets are not baked into the Docker image.
+- The container runs as the unprivileged `app` user.
 
-`.gitignore` и `.dockerignore` уже исключают эти данные. Не используйте `docker compose down -v`, если хотите сохранить rotated tokens и активные OAuth connections.
+For a multi-user deployment, replace the shared `OAUTH_USERNAME` and `OAUTH_PASSWORD` with a real identity provider and maintain a separate Hubstaff credential mapping for each user.
 
-## Безопасность
+## Hubstaff API limitations
 
-- Все бизнес-инструменты работают только на чтение.
-- Публичный MCP endpoint требует OAuth token или `MCP_AUTH_TOKEN`.
-- OAuth access tokens проверяются по issuer, audience, expiry и scope.
-- Authorization Code защищён PKCE S256 и одноразовым кодом.
-- Callback URI ограничены доверенными доменами ChatGPT/OpenAI.
-- Access tokens короткоживущие, refresh tokens ротируются.
-- Секреты не встраиваются в Docker image.
-- Контейнер работает от непривилегированного пользователя `app`.
-
-Для multi-user production deployment вместо общего `OAUTH_USERNAME`/`OAUTH_PASSWORD` рекомендуется подключить полноценный identity provider и хранить отдельную привязку Hubstaff credential к каждому пользователю.
-
-## Ограничения Hubstaff
-
-- Activity API принимает интервал не более 7 дней за запрос; `hubstaff_task_hours` автоматически разбивает длинный период на части.
-- Диапазон `hubstaff_task_hours` ограничен 183 днями.
-- Детальная история активности зависит от доступного периода Hubstaff и тарифа организации.
-- Публичный Hubstaff API v2 не предоставляет комментарии задач. Для интегрированной задачи используйте `project_type` и `remote_id`, чтобы обратиться к API исходной системы.
-- Audit Log API доступен только организациям на Enterprise и требует роль Owner или Organization Manager с разрешением просмотра данных других пользователей. Журнал аудита не содержит комментарии.
-- Доступ к организациям и проектам всегда ограничен правами пользователя или участника, которому принадлежит Hubstaff credential.
+- The Activity API accepts at most seven days per request. `hubstaff_task_hours` splits longer ranges automatically.
+- `hubstaff_task_hours` accepts a maximum range of 183 days.
+- Detailed activity history depends on Hubstaff retention and your organization plan.
+- The public Hubstaff API v2 does not expose task comments. For an integrated task, use `project_type` and `remote_id` to query the source system directly.
+- The Audit Log API is available only on Hubstaff Enterprise and requires an Owner or Organization Manager with permission to view other members' data. Audit events do not contain task comments.
+- All results remain limited by the permissions of the member represented by the configured Hubstaff credential.
 
 ## Troubleshooting
 
 ### `hubstaff_configured: false`
 
-Не задан ни один `HUBSTAFF_ORGANIZATION_TOKEN`, `HUBSTAFF_REFRESH_TOKEN` или `HUBSTAFF_ACCESS_TOKEN`. После изменения `.env` пересоздайте контейнер:
+No Hubstaff organization token, access token, or refresh token is configured. Update `.env`, then recreate the container:
 
 ```bash
 docker compose up -d --force-recreate
 ```
 
-### PAT возвращает `invalid_grant` или `401`
+### PAT returns `invalid_grant` or `401`
 
-PAT уже мог быть использован другим приложением и ротирован. Выпустите отдельный PAT для этого сервера и не разделяйте его между несколькими consumers.
+The PAT may have been refreshed by another application, which invalidated the value stored by this server. Create a dedicated PAT for this deployment and make sure `/data/token.json` is stored on persistent storage.
 
 ### `Authorization request expired`
 
-Authorization request одноразовый и действует ограниченное время. Закройте старую страницу, запустите **Connect/Retry** в ChatGPT и отправьте новую форму один раз.
+Authorization requests are single-use and expire quickly. Close the old page, start **Connect** or **Retry** in ChatGPT, and submit the newly opened form once.
 
-### ChatGPT не показывает кнопку `+`
+### ChatGPT does not show the custom app option
 
-Проверьте, что вы используете веб-версию ChatGPT, включили **Developer mode**, ваш план поддерживает эту функцию, а workspace administrator разрешил developer-mode apps.
+Use the ChatGPT web app, enable Developer mode, confirm your plan supports custom apps, and ask the workspace administrator to allow developer-mode apps if necessary.
 
-### Нужны комментарии задачи
+### Task comments are required
 
-Публичный Hubstaff API v2 не имеет endpoint комментариев. Получите карточку через `hubstaff_get_task`, определите `project_type` и `remote_id`, затем используйте API исходной системы — например GitHub, Jira или Asana. Добавление `tasks:read` не создаёт отсутствующий endpoint.
+The public Hubstaff API v2 has no task-comments endpoint. Call `hubstaff_get_task`, inspect `project_type` and `remote_id`, then query the source system—for example GitHub, Jira, or Asana. Adding a scope cannot create an endpoint that Hubstaff does not expose.
 
-### Audit Log возвращает `403`
+### Audit Log returns `403`
 
-Журнал аудита требует Hubstaff Enterprise, а credential должен действовать от имени Owner или Organization Manager с разрешением просмотра данных других пользователей.
+Audit Log access requires Hubstaff Enterprise. The credential must also represent an Owner or Organization Manager with permission to view other members' data.
 
-### Проверка контейнера
+### Inspect the container
 
 ```bash
 docker compose ps
@@ -477,7 +424,7 @@ docker compose logs --tail=100
 curl http://localhost:3000/health
 ```
 
-## Разработка
+## Development
 
 ```bash
 npm ci
@@ -486,16 +433,9 @@ npm test
 npm run build
 ```
 
-Основной стек:
+The project uses TypeScript, Express, the official MCP TypeScript SDK, JOSE/JWT, Vitest, and a multi-stage Docker build.
 
-- TypeScript + Node.js;
-- official MCP TypeScript SDK;
-- Express + Streamable HTTP;
-- JOSE/JWT;
-- Vitest;
-- Docker/BuildKit.
-
-## Документация
+## Documentation
 
 - [Hubstaff API](https://developer.hubstaff.com/)
 - [Hubstaff authentication](https://developer.hubstaff.com/authentication/)

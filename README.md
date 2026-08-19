@@ -1,35 +1,35 @@
 # Hubstaff MCP Server
 
-Удалённый read-only MCP-сервер для официального Hubstaff API v2. Он предоставляет задачи, свежие изменения, источник задачи, агрегированное время и, при наличии Enterprise-доступа, журнал аудита через Streamable HTTP.
+A read-only remote MCP server for the official Hubstaff API v2. It gives ChatGPT and other MCP clients access to tasks, recent changes, task source metadata, tracked time, and—on eligible Enterprise accounts—audit events over Streamable HTTP.
 
-Сервер включает встроенный OAuth 2.1 authorization server для ChatGPT Developer mode: DCR, authorization code, PKCE S256, audience-bound JWT access tokens и ротируемые refresh tokens.
+The server includes an OAuth 2.1 authorization server for ChatGPT Developer mode, with Dynamic Client Registration, Authorization Code + PKCE S256, audience-bound JWT access tokens, and rotating refresh tokens.
 
 ## MCP tools
 
-- `hubstaff_list_organizations` — доступные организации и их ID.
-- `hubstaff_capabilities` — поддерживаемые источники данных и ограничения API.
-- `hubstaff_list_tasks` — задачи организации с фильтрами.
-- `hubstaff_get_task` — подробности задачи и идентификаторы исходной системы.
-- `hubstaff_recent_updates` — недавно изменённые задачи и записи времени.
-- `hubstaff_task_hours` — часы по задаче и разбивка по пользователям.
-- `hubstaff_list_audit_log_entries` — журнал аудита организации; требуется Enterprise и роль Owner/Manager.
+- `hubstaff_capabilities` describes the data the server can and cannot access.
+- `hubstaff_list_organizations` lists visible organizations and their IDs.
+- `hubstaff_list_tasks` lists and filters organization tasks.
+- `hubstaff_get_task` returns task details and source-system identifiers.
+- `hubstaff_recent_updates` returns recently changed tasks and time records.
+- `hubstaff_task_hours` totals tracked time by task and user.
+- `hubstaff_list_audit_log_entries` returns organization audit events. It requires Hubstaff Enterprise and an Owner or Manager role with the necessary permissions.
 
-Все инструменты только читают данные.
+Every tool is read-only.
 
-## Настройка
+## Configuration
 
-1. Скопируйте `.env.example` в `.env`.
-2. Укажите `MCP_AUTH_TOKEN` длиной не менее 32 символов.
-3. Для ChatGPT укажите `OAUTH_ISSUER`, `OAUTH_USERNAME`, `OAUTH_PASSWORD` и `OAUTH_SIGNING_SECRET`. OAuth-состояние сохраняется в `/data/oauth-state.json`.
-4. Выберите один вариант авторизации Hubstaff:
+1. Copy `.env.example` to `.env`.
+2. Set `MCP_AUTH_TOKEN` to a random value at least 32 characters long.
+3. For ChatGPT, set `OAUTH_ISSUER`, `OAUTH_USERNAME`, `OAUTH_PASSWORD`, and `OAUTH_SIGNING_SECRET`. OAuth state is stored in `/data/oauth-state.json`.
+4. Choose one Hubstaff authentication method:
 
-   - `HUBSTAFF_ORGANIZATION_TOKEN` (`hsoat_...`) — рекомендуемый вариант для постоянно работающего сервера;
-   - `HUBSTAFF_REFRESH_TOKEN` — Personal Access Token, который Hubstaff выдаёт как refresh token;
-   - `HUBSTAFF_ACCESS_TOKEN` — временный access token.
+   - `HUBSTAFF_ORGANIZATION_TOKEN` (`hsoat_...`) is the recommended option for a long-running service.
+   - `HUBSTAFF_REFRESH_TOKEN` accepts the refresh token Hubstaff issues when you create a Personal Access Token.
+   - `HUBSTAFF_ACCESS_TOKEN` accepts a short-lived access token for testing.
 
-Для PAT нужен scope `hubstaff:read`. Hubstaff вращает refresh token при каждом обмене; сервер атомарно сохраняет актуальную пару в `/data/token.json` внутри именованного Docker volume. Исходный ключ остаётся только в `.env`, а `.env` исключён из Git и Docker build context.
+A PAT needs the `hubstaff:read` scope. Hubstaff rotates refresh tokens after every exchange, so the server atomically stores the latest token pair in `/data/token.json` inside the named Docker volume. The original secret remains in `.env`; `.env` is excluded from both Git and the Docker build context.
 
-Запуск:
+Run from source:
 
 ```bash
 npm ci
@@ -38,45 +38,45 @@ npm test
 npm start
 ```
 
-Docker:
+Run with Docker:
 
 ```bash
 docker compose up -d --build
 ```
 
-## Подключение MCP-клиента
+## Connect an MCP client
 
-URL:
+Endpoint:
 
 ```text
 https://hubstuff-mcp.copperdiver.studio/mcp
 ```
 
-Для обычного MCP-клиента можно использовать служебный заголовок:
+Traditional MCP clients can authenticate with a static bearer token:
 
 ```text
 Authorization: Bearer <MCP_AUTH_TOKEN>
 ```
 
-ChatGPT подключается по OAuth автоматически. Сервер публикует:
+ChatGPT discovers and completes OAuth automatically. The server publishes:
 
 - `/.well-known/oauth-protected-resource`
 - `/.well-known/oauth-authorization-server`
-- `/oauth/register`, `/oauth/authorize`, `/oauth/token`
+- `/oauth/register`, `/oauth/authorize`, and `/oauth/token`
 
-В ChatGPT включите **Settings → Security and login → Developer mode**, затем на странице Plugins добавьте URL `https://hubstuff-mcp.copperdiver.studio/mcp` с OAuth/DCR. Во время первого подключения введите `OAUTH_USERNAME` и `OAUTH_PASSWORD` из серверного `.env`.
+In ChatGPT, enable **Settings → Security and login → Developer mode**. Add `https://hubstuff-mcp.copperdiver.studio/mcp` as a custom app using OAuth/DCR, then sign in with the `OAUTH_USERNAME` and `OAUTH_PASSWORD` configured on the server.
 
-Проверка доступности без секрета:
+Check availability without sending a secret:
 
 ```bash
 curl https://hubstuff-mcp.copperdiver.studio/health
 ```
 
-## Ограничения Hubstaff
+## Hubstaff API limitations
 
-- Activity API отдаёт интервалы не более чем за 7 дней одним запросом; `hubstaff_task_hours` сам разбивает диапазон на части.
-- История детальной активности доступна максимум примерно за 6 месяцев.
-- Публичный Hubstaff API v2 не предоставляет комментарии задач. Для интегрированных задач используйте `project_type` и `remote_id`, чтобы обратиться к API исходной системы.
-- Audit Log API доступен только организациям на Enterprise и требует роль Owner или Organization Manager с разрешением просмотра данных других пользователей. Журнал аудита не содержит комментарии задач.
+- The Activity API accepts no more than seven days per request. `hubstaff_task_hours` splits longer ranges automatically.
+- Detailed activity history is limited by Hubstaff's retention period and your organization plan.
+- The public Hubstaff API v2 does not expose task comments. For integrated tasks, use `project_type` and `remote_id` to query the source system directly.
+- The Audit Log API is available only to Enterprise organizations and requires an Owner or Organization Manager with permission to view other members' data. Audit events do not include task comments.
 
-Официальная документация: [Hubstaff API](https://developer.hubstaff.com/), [authentication](https://developer.hubstaff.com/authentication/), [tasks](https://developer.hubstaff.com/reference/tasks/), [activities](https://developer.hubstaff.com/reference/activities/), [audit log](https://developer.hubstaff.com/reference/audit_log_entries/).
+Official documentation: [Hubstaff API](https://developer.hubstaff.com/), [authentication](https://developer.hubstaff.com/authentication/), [tasks](https://developer.hubstaff.com/reference/tasks/), [activities](https://developer.hubstaff.com/reference/activities/), and [audit log](https://developer.hubstaff.com/reference/audit_log_entries/).

@@ -60,6 +60,7 @@ describe("OAuth 2.1 server", () => {
       .expect(200);
     const pendingId = /name="pending_id" value="([^"]+)"/.exec(authorization.text)?.[1];
     expect(pendingId).toBeTruthy();
+    expect(authorization.headers["content-security-policy"]).toContain("form-action 'self' https://chatgpt.com");
 
     await request(app)
       .post("/oauth/authorize")

@@ -97,6 +97,15 @@ ${error ? `<p class="error">${htmlEscape(error)}</p>` : ""}
 </form></main></body></html>`;
 }
 
+function loginResponseHeaders(redirectUri: string): Record<string, string> {
+  const callbackOrigin = new URL(redirectUri).origin;
+  return {
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${callbackOrigin}; frame-ancestors 'none'`,
+    "Referrer-Policy": "no-referrer",
+  };
+}
+
 class OAuthStore {
   private state = emptyState();
   private initialized?: Promise<void>;
@@ -362,7 +371,7 @@ export class OAuthService {
         resource,
         codeChallenge,
       });
-      response.set({ "Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'", "Referrer-Policy": "no-referrer" });
+      response.set(loginResponseHeaders(redirectUri));
       response.send(renderLogin(pending.id, client.clientName));
     });
 
@@ -390,7 +399,7 @@ export class OAuthService {
       const username = String(request.body?.username ?? "");
       const password = String(request.body?.password ?? "");
       if (!constantTimeMatches(username, this.username) || !constantTimeMatches(password, this.password)) {
-        response.status(401).set({ "Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'" });
+        response.status(401).set(loginResponseHeaders(pending.redirectUri));
         response.send(renderLogin(pending.id, client.clientName, "Invalid username or password"));
         return;
       }

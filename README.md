@@ -448,6 +448,7 @@ The project uses TypeScript, Express, the official MCP TypeScript SDK, JOSE/JWT,
 
 ## Documentation
 
+- [Release guide](docs/release-guide.md)
 - [Hubstaff API](https://developer.hubstaff.com/)
 - [Hubstaff authentication](https://developer.hubstaff.com/authentication/)
 - [Hubstaff tasks](https://developer.hubstaff.com/reference/tasks/)

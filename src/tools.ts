@@ -1,6 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { HubstaffApiError, HubstaffClient, nextPageStartId, type Query } from "./hubstaff-client.js";
+import { classifyError, HubstaffRequestError, ToolInputError } from "./errors.js";
+import {
+  currentDiagnostic, elapsed, inDiagnostic, logDiagnostic, newDiagnostic, setDiagnosticOperation,
+} from "./diagnostics.js";
 
 type JsonObject = Record<string, unknown>;
 type ToolResult = ReturnType<typeof result> & { isError?: boolean };
@@ -15,58 +19,59 @@ function result(data: unknown) {
   };
 }
 
-function errorResult(code: string, message: string, status?: number): ToolResult {
+function errorResult(code: string, message: string, category: string, diagnosticId: string, status?: number): ToolResult {
   return {
-    ...result({ error: { code, message, ...(status === undefined ? {} : { status }) } }),
+    ...result({ error: {
+      code, message, category, diagnostic_id: diagnosticId, ...(status === undefined ? {} : { status }),
+    } }),
     isError: true,
   };
 }
 
-class ToolInputError extends Error {}
-
-function apiErrorDetail(error: HubstaffApiError): string | undefined {
-  try {
-    const body = JSON.parse(error.body) as Record<string, unknown>;
-    const detail = body.error_description ?? body.error ?? body.code;
-    return typeof detail === "string" && detail.trim() ? detail.trim() : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export function hubstaffErrorResult(error: unknown, forbiddenMessage?: string): ToolResult {
-  if (error instanceof ToolInputError) return errorResult("INVALID_ARGUMENT", error.message);
+  const diagnostic = currentDiagnostic() ?? newDiagnostic();
+  inDiagnostic(diagnostic, () => logDiagnostic("tool.failed", { duration_ms: elapsed(diagnostic.started) }, error));
+  const failure = (code: string, message: string, status?: number) =>
+    errorResult(code, message, classifyError(error).error_category, diagnostic.diagnostic_id, status);
+  if (error instanceof ToolInputError) return failure("INVALID_ARGUMENT", error.message);
+  if (error instanceof HubstaffRequestError) {
+    const messages = {
+      timeout: ["HUBSTAFF_TIMEOUT", "The Hubstaff request timed out."],
+      network: ["HUBSTAFF_NETWORK_ERROR", "The connection to Hubstaff could not be completed."],
+      response: ["HUBSTAFF_INVALID_RESPONSE", "Hubstaff returned an unreadable response."],
+    } as const;
+    const [code, message] = messages[error.kind];
+    return failure(code, message, error.status);
+  }
   if (!(error instanceof HubstaffApiError)) {
-    return errorResult("TOOL_EXECUTION_FAILED", "The Hubstaff request could not be completed.");
+    return failure("INTERNAL_ERROR", "The server could not complete the Hubstaff tool call.");
   }
 
-  const detail = apiErrorDetail(error);
-  const suffix = detail ? ` Hubstaff response: ${detail}.` : "";
   switch (error.status) {
     case 400:
-      return errorResult("HUBSTAFF_INVALID_REQUEST", `Hubstaff rejected the request parameters.${suffix}`, 400);
+      return failure("HUBSTAFF_INVALID_REQUEST", "Hubstaff rejected the request parameters.", 400);
     case 401:
-      return errorResult(
+      return failure(
         "HUBSTAFF_AUTHENTICATION_FAILED",
-        `Hubstaff rejected the configured credential. Check that the PAT refresh token is current and that token rotation is persisted.${suffix}`,
+        "Hubstaff rejected the configured credential. Check that the PAT refresh token is current and that token rotation is persisted.",
         401,
       );
     case 403:
-      return errorResult(
+      return failure(
         "HUBSTAFF_ACCESS_DENIED",
-        `${forbiddenMessage ?? "The configured Hubstaff member, plan, or hubstaff:read scope does not permit this request."}${suffix}`,
+        forbiddenMessage ?? "The configured Hubstaff member, plan, or hubstaff:read scope does not permit this request.",
         403,
       );
     case 404:
-      return errorResult(
+      return failure(
         "HUBSTAFF_RESOURCE_NOT_FOUND",
-        `Hubstaff could not find this V2 resource. Verify that the ID belongs to the configured organization.${suffix}`,
+        "Hubstaff could not find this V2 resource. Verify that the ID belongs to the configured organization.",
         404,
       );
     case 429:
-      return errorResult("HUBSTAFF_RATE_LIMITED", `Hubstaff rate-limited the request. Retry later.${suffix}`, 429);
+      return failure("HUBSTAFF_RATE_LIMITED", "Hubstaff rate-limited the request. Retry later.", 429);
     default:
-      return errorResult("HUBSTAFF_API_ERROR", `Hubstaff returned HTTP ${error.status}.${suffix}`, error.status);
+      return failure("HUBSTAFF_API_ERROR", `Hubstaff returned HTTP ${error.status}.`, error.status);
   }
 }
 
@@ -104,6 +109,14 @@ function hours(seconds: number): number {
   return Math.round((seconds / 3600) * 100) / 100;
 }
 
+function recordPage(records: number): void {
+  const diagnostic = currentDiagnostic();
+  if (diagnostic) {
+    diagnostic.pages_count++;
+    diagnostic.records_count += records;
+  }
+}
+
 async function collectPages(
   client: HubstaffClient,
   path: string,
@@ -112,24 +125,61 @@ async function collectPages(
   maxItems = 1000,
 ): Promise<JsonObject[]> {
   const items: JsonObject[] = [];
+  const started = performance.now();
+  let pages = 0;
   let pageStartId: string | undefined;
   while (items.length < maxItems) {
+    const pageLimit = Math.min(100, maxItems - items.length);
     const page = await client.get<JsonObject>(path, {
       ...query,
-      page_limit: Math.min(100, maxItems - items.length),
+      page_limit: pageLimit,
       ...(pageStartId ? { page_start_id: pageStartId } : {}),
     });
     const current = Array.isArray(page[collection]) ? (page[collection] as JsonObject[]) : [];
     items.push(...current);
+    pages++;
+    recordPage(current.length);
     const next = nextPageStartId(page);
-    if (!next || current.length === 0 || next === pageStartId) break;
+    logDiagnostic("pagination.page", {
+      page_number: pages, page_limit: pageLimit, page_records: current.length,
+      page_start_id_present: pageStartId !== undefined, next_page_present: next !== undefined,
+    });
+    const stopReason = !next ? "no_next_page" : current.length === 0 ? "empty_page"
+      : next === pageStartId ? "repeated_cursor" : items.length >= maxItems ? "max_items" : undefined;
+    if (stopReason) {
+      logDiagnostic("pagination.completed", { stop_reason: stopReason, duration_ms: elapsed(started) });
+      break;
+    }
     pageStartId = next;
   }
   return items;
 }
 
-export function registerTools(server: McpServer, client: HubstaffClient): void {
-  server.registerTool(
+export function registerTools(server: McpServer, client: HubstaffClient): Map<string, z.AnyZodObject> {
+  const schemas = new Map<string, z.AnyZodObject>();
+  // Reuse exactly the SDK's advertised schemas for safe HTTP validation errors.
+  function registerTool<Shape extends z.ZodRawShape>(
+    name: string,
+    config: {
+      title: string; description: string; inputSchema: Shape;
+      annotations: typeof readOnly; _meta: Record<string, unknown>;
+    },
+    handler: (args: z.output<z.ZodObject<Shape>>) => Promise<ToolResult>,
+  ) {
+    schemas.set(name, z.object(config.inputSchema));
+    server.registerTool<z.ZodRawShape, z.ZodRawShape>(name, config, async (args) => {
+      const diagnostic = currentDiagnostic() ?? newDiagnostic();
+      return inDiagnostic(diagnostic, async () => {
+        setDiagnosticOperation("tools/call", name, args);
+        logDiagnostic("tool.started");
+        const output = await safeTool(() => handler(args as z.output<z.ZodObject<Shape>>));
+        if (!output.isError) logDiagnostic("tool.completed", { duration_ms: elapsed(diagnostic.started) });
+        return output;
+      });
+    });
+  }
+
+  registerTool(
     "hubstaff_capabilities",
     {
       title: "Describe Hubstaff MCP capabilities",
@@ -159,7 +209,7 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
     }),
   );
 
-  server.registerTool(
+  registerTool(
     "hubstaff_list_organizations",
     {
       title: "List Hubstaff organizations",
@@ -168,10 +218,14 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
       annotations: readOnly,
       _meta: { securitySchemes: oauthSecurity },
     },
-    async ({ page_limit }) => safeTool(async () => result(await client.get("/v2/organizations", { page_limit }))),
+    async ({ page_limit }) => safeTool(async () => {
+      const organizations = await client.get<JsonObject>("/v2/organizations", { page_limit });
+      recordPage(Array.isArray(organizations?.organizations) ? organizations.organizations.length : 0);
+      return result(organizations);
+    }),
   );
 
-  server.registerTool(
+  registerTool(
     "hubstaff_list_tasks",
     {
       title: "List Hubstaff tasks",
@@ -202,7 +256,7 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
     }),
   );
 
-  server.registerTool(
+  registerTool(
     "hubstaff_get_task",
     {
       title: "Get a Hubstaff task",
@@ -213,11 +267,12 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
     },
     async ({ task_id }) => safeTool(async () => {
       const task = await client.get<JsonObject>(`/v2/tasks/${task_id}`);
+      recordPage(1);
       return result({ ...task, task_source: taskSource(task) });
     }),
   );
 
-  server.registerTool(
+  registerTool(
     "hubstaff_recent_updates",
     {
       title: "Get recent task and time updates",
@@ -268,7 +323,7 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
     }),
   );
 
-  server.registerTool(
+  registerTool(
     "hubstaff_task_hours",
     {
       title: "Calculate hours spent on a task",
@@ -331,7 +386,7 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
     }),
   );
 
-  server.registerTool(
+  registerTool(
     "hubstaff_list_audit_log_entries",
     {
       title: "List Hubstaff audit log entries",
@@ -389,4 +444,5 @@ export function registerTools(server: McpServer, client: HubstaffClient): void {
         });
       }, "Hubstaff Audit Log requires an Enterprise plan and an Owner or Organization Manager with permission to view others' data."),
   );
+  return schemas;
 }

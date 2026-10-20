@@ -388,6 +388,17 @@ For a multi-user deployment, replace the shared `OAUTH_USERNAME` and `OAUTH_PASS
 
 ## Troubleshooting
 
+### Diagnose a failed tool call
+
+Tool errors include a safe `diagnostic_id` and a category: `validation`,
+`upstream`, or `internal`. Match the ID with the server's JSON stdout/stderr
+events to inspect pagination progress, duration, HTTP status and retry/timeout
+details. Responses also include an `X-Diagnostic-Id` header.
+
+See [diagnostic fields, redaction, local findings, and the release verification
+checklist](docs/diagnostics.md). Upstream error bodies and raw exception messages
+are deliberately omitted. A tool can return `isError: true` inside HTTP 200.
+
 ### `hubstaff_configured: false`
 
 No Hubstaff organization token, access token, or refresh token is configured. Update `.env`, then recreate the container:

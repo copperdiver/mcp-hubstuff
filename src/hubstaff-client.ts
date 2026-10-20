@@ -1,6 +1,10 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { Config } from "./config.js";
+import { currentDiagnostic, elapsed, inDiagnostic, logDiagnostic, newDiagnostic } from "./diagnostics.js";
+import { HubstaffApiError, HubstaffRequestError, isTimeout } from "./errors.js";
+
+export { HubstaffApiError } from "./errors.js";
 
 type QueryValue = string | number | boolean | Array<string | number> | undefined;
 export type Query = Record<string, QueryValue>;
@@ -17,17 +21,6 @@ interface TokenResponse {
   expires_in: number;
 }
 
-export class HubstaffApiError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly body: string,
-    message = `Hubstaff API request failed with HTTP ${status}`,
-  ) {
-    super(message);
-    this.name = "HubstaffApiError";
-  }
-}
-
 export class HubstaffClient {
   private accessToken?: string;
   private refreshToken?: string;
@@ -42,14 +35,19 @@ export class HubstaffClient {
   }
 
   async request<T>(method: string, path: string, query?: Query): Promise<T> {
+    if (!currentDiagnostic()) {
+      return inDiagnostic(newDiagnostic(), () => this.request<T>(method, path, query));
+    }
     const token = await this.getToken();
-    const response = await this.fetchWithToken(method, path, token, query);
-    if (response.status === 401 && this.refreshToken && !this.config.organizationToken) {
+    const canRefresh = Boolean(this.refreshToken && !this.config.organizationToken);
+    const response = await this.fetchWithToken<T>(method, path, token, query, 1, canRefresh);
+    if (response.status === 401 && canRefresh) {
+      logDiagnostic("upstream.retry", { phase: "api", retry_reason: "unauthorized", retry_count: 1 });
       this.expiresAt = 0;
       const refreshed = await this.refresh();
-      return this.parseResponse<T>(await this.fetchWithToken(method, path, refreshed, query));
+      return (await this.fetchWithToken<T>(method, path, refreshed, query, 2)).data as T;
     }
-    return this.parseResponse<T>(response);
+    return response.data as T;
   }
 
   get<T>(path: string, query?: Query): Promise<T> {
@@ -104,16 +102,19 @@ export class HubstaffClient {
     if (this.config.authMode === "oauth") {
       headers.authorization = `Basic ${Buffer.from(`${this.config.clientId}:${this.config.clientSecret}`).toString("base64")}`;
     }
-    const response = await fetch(this.config.tokenUrl, {
+    const token = await this.send<TokenResponse>("token_refresh", new URL(this.config.tokenUrl), {
       method: "POST",
       headers,
       body,
       signal: AbortSignal.timeout(this.config.requestTimeoutMs),
+    }, async (response) => {
+      if (!response.ok) {
+        throw new HubstaffApiError(
+          response.status, await this.readBody<string>(response, true), "Unable to refresh the Hubstaff access token",
+        );
+      }
+      return this.readBody<TokenResponse>(response);
     });
-    if (!response.ok) {
-      throw new HubstaffApiError(response.status, await response.text(), "Unable to refresh the Hubstaff access token");
-    }
-    const token = (await response.json()) as TokenResponse;
     this.accessToken = token.access_token;
     this.refreshToken = token.refresh_token ?? this.refreshToken;
     this.expiresAt = Date.now() + token.expires_in * 1000;
@@ -133,7 +134,9 @@ export class HubstaffClient {
     await rename(temporary, target);
   }
 
-  private fetchWithToken(method: string, path: string, token: string, query?: Query): Promise<Response> {
+  private fetchWithToken<T>(
+    method: string, path: string, token: string, query?: Query, attempt = 1, canRefresh = false,
+  ): Promise<{ status: number; data?: T }> {
     const url = new URL(path, `${this.config.apiBase}/`);
     for (const [key, value] of Object.entries(query ?? {})) {
       if (value === undefined) continue;
@@ -143,17 +146,76 @@ export class HubstaffClient {
         url.searchParams.set(key, String(value));
       }
     }
-    return fetch(url, {
+    return this.send("api", url, {
       method,
       headers: { authorization: `Bearer ${token}`, accept: "application/json" },
       signal: AbortSignal.timeout(this.config.requestTimeoutMs),
-    });
+    }, async (response) => ({
+      status: response.status,
+      data: response.status === 401 && canRefresh ? undefined : await this.parseResponse<T>(response),
+    }), attempt, query);
+  }
+
+  private async send<T>(
+    phase: "api" | "token_refresh",
+    url: URL,
+    init: RequestInit,
+    consume: (response: Response) => Promise<T>,
+    attempt = 1,
+    query?: Query,
+  ): Promise<T> {
+    const started = performance.now();
+    const diagnostic = currentDiagnostic();
+    if (diagnostic) {
+      diagnostic.attempts++;
+      if (attempt > 1) diagnostic.retries++;
+    }
+    const fields = {
+      phase, http_method: init.method, attempt, retry_count: attempt - 1,
+      timeout_ms: this.config.requestTimeoutMs,
+      page_limit: query?.page_limit,
+      page_start_id_present: query?.page_start_id !== undefined,
+    };
+    logDiagnostic("upstream.started", fields);
+    let status: number | undefined;
+    try {
+      let response: Response;
+      try {
+        response = await fetch(url, init);
+      } catch (error) {
+        throw new HubstaffRequestError(isTimeout(error) ? "timeout" : "network", error);
+      }
+      status = response.status;
+      const data = await consume(response);
+      logDiagnostic("upstream.completed", { ...fields, upstream_status: status, duration_ms: elapsed(started) });
+      return data;
+    } catch (error) {
+      // Fetch may report AbortError while consuming a body even when the
+      // configured deadline (TimeoutError on the signal) caused the abort.
+      if (error instanceof HubstaffRequestError && error.kind === "network" &&
+          init.signal?.aborted && isTimeout(init.signal.reason)) {
+        error = new HubstaffRequestError("timeout", error.cause, status);
+      }
+      logDiagnostic("upstream.failed", { ...fields, upstream_status: status, duration_ms: elapsed(started) }, error);
+      throw error;
+    }
+  }
+
+  private async readBody<T>(response: Response, text = false): Promise<T> {
+    try {
+      return (text ? await response.text() : await response.json()) as T;
+    } catch (error) {
+      throw new HubstaffRequestError(
+        isTimeout(error) ? "timeout" : error instanceof SyntaxError ? "response" : "network",
+        error, response.status,
+      );
+    }
   }
 
   private async parseResponse<T>(response: Response): Promise<T> {
-    if (!response.ok) throw new HubstaffApiError(response.status, await response.text());
+    if (!response.ok) throw new HubstaffApiError(response.status, await this.readBody<string>(response, true));
     if (response.status === 204) return {} as T;
-    return (await response.json()) as T;
+    return this.readBody<T>(response);
   }
 }
 

@@ -5,6 +5,7 @@ import { jwtVerify, SignJWT } from "jose";
 import type { NextFunction, Request, Response, Router } from "express";
 import express from "express";
 import type { Config } from "./config.js";
+import { inDiagnostic, logDiagnostic, newDiagnostic } from "./diagnostics.js";
 
 export const OAUTH_SCOPE = "hubstaff.read";
 
@@ -456,8 +457,10 @@ export class OAuthService {
         }
         response.json(await this.issueTokens(clientId, subject, scope, resource, refreshToken));
       } catch (error) {
-        console.error("OAuth token issuance failed", error);
-        response.status(500).json({ error: "server_error" });
+        const diagnostic = newDiagnostic();
+        inDiagnostic(diagnostic, () => logDiagnostic("oauth.failed", {}, error));
+        response.setHeader("X-Diagnostic-Id", diagnostic.diagnostic_id);
+        response.status(500).json({ error: "server_error", diagnostic_id: diagnostic.diagnostic_id });
       }
     });
 

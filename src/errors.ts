@@ -10,6 +10,7 @@ export class HubstaffApiError extends Error {
     public readonly status: number,
     public readonly body: string,
     message = `Hubstaff API request failed with HTTP ${status}`,
+    public readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = "HubstaffApiError";

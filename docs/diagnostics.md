@@ -138,6 +138,33 @@ git diff --check
 
 Do not stage `.local-checks`, `node_modules`, `dist`, `.env`, or credential data.
 
+## Polling and session diagnostics
+
+See [Optional polling events](../README.md#optional-polling-events) for the exact
+environment variables, defaults, persistence requirements and upstream limits.
+`hubstaff_list_events` and event resources include safe per-source health:
+`idle`, `healthy`, `backoff`, `unavailable`, or `error`, with last success,
+next poll time and an allowlisted error code when present. A source can be
+unavailable while ordinary read tools and `/health` remain usable.
+
+Notifications require an initialized session, an open GET stream and an explicit
+subscription to `hubstaff://events/{organizationId}`. An empty event stream alone
+does not indicate polling failure. Check source health and use
+`hubstaff_list_events` with the last `next_cursor` to recover retained updates.
+Notifications carry only the resource URI, never the event payload. Unsubscribe
+or DELETE when finished; transport closure removes retained subscriptions and
+shutdown stops polling and closes sessions. A restart requires initialization
+and subscription again. A failed notification is logged as a sanitized
+`mcp.failed` event without interrupting polling or other subscribers.
+
+Each session request retains its own HTTP diagnostic context, including tool
+validation failures; batches retain separate item IDs. Authorization remains
+mandatory for POST, GET and DELETE. Unknown session IDs receive a generic 404
+without echoing the supplied ID. Legacy POST tool requests without a session
+remain ephemeral and do not support subscription delivery. Logs exclude session
+IDs, authorization headers, event bodies, source snapshots and state paths.
+Do not paste persistent event state or upstream payloads into diagnostic reports.
+
 ## Remaining release and production verification
 
 These are future actions requiring separate authorization. They were not

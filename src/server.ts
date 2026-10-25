@@ -1,12 +1,15 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { CallToolRequestSchema, JSONRPCRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, JSONRPCRequestSchema, SubscribeRequestSchema, UnsubscribeRequestSchema,
+  isInitializeRequest, McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 import type { Config } from "./config.js";
 import { hasHubstaffCredentials, hasOAuth } from "./config.js";
 import { HubstaffClient } from "./hubstaff-client.js";
-import { hubstaffErrorResult, registerTools } from "./tools.js";
+import { eventResourceUri, hubstaffErrorResult, registerTools } from "./tools.js";
+import type { EventStore } from "./events.js";
+import type { EventMonitor } from "./event-monitor.js";
 import { OAuthService, oauthMiddleware } from "./oauth.js";
 import { ToolInputError } from "./errors.js";
 import {
@@ -21,15 +24,36 @@ function bearerMatches(request: Request, expected: string): boolean {
   return suppliedBuffer.length === expectedBuffer.length && timingSafeEqual(suppliedBuffer, expectedBuffer);
 }
 
-function createMcpServer(client: HubstaffClient) {
+type McpSession = { server: McpServer; transport: StreamableHTTPServerTransport; subscribedUris: Set<string> };
+
+function createMcpServer(client: HubstaffClient, events?: EventStore) {
   const server = new McpServer({ name: "hubstaff-mcp", version: "1.0.0" });
-  const schemas = registerTools(server, client);
+  const schemas = registerTools(server, client, events);
   return { server, schemas };
 }
 
-export function createHttpApp(config: Config) {
+export function createHttpApp(config: Config, events?: { store: EventStore; monitor: EventMonitor },
+  client = new HubstaffClient(config)) {
   const app = express();
-  const client = new HubstaffClient(config);
+  const sessions = new Map<string, McpSession>();
+  const batchRequests = new WeakSet<object>();
+  const enabledEvents = config.events.enabled ? events : undefined;
+  const unsubscribe = enabledEvents?.monitor.onEvents((organizationId) => {
+    const uri = eventResourceUri(organizationId);
+    for (const session of sessions.values()) {
+      if (session.subscribedUris.has(uri)) {
+        void session.server.server.sendResourceUpdated({ uri }).catch((error: unknown) => {
+          logDiagnostic("mcp.failed", {}, error);
+        });
+      }
+    }
+  });
+  app.locals.close = async () => {
+    enabledEvents?.monitor.stop();
+    unsubscribe?.();
+    await Promise.allSettled([...sessions.values()].map(({ server }) => server.close()));
+    sessions.clear();
+  };
   app.disable("x-powered-by");
   app.use("/mcp", (_request, response, next) => {
     const diagnostic = newDiagnostic();
@@ -55,6 +79,7 @@ export function createHttpApp(config: Config) {
   });
 
   app.use("/mcp", (request: Request, response: Response, next: NextFunction) => {
+    if (Array.isArray(request.body)) batchRequests.add(currentDiagnostic()!);
     setDiagnosticOperation(request.body?.method, request.body?.params?.name, request.body?.params?.arguments);
     if (authenticateOAuth) {
       authenticateOAuth(request, response, next).catch(next);
@@ -72,22 +97,61 @@ export function createHttpApp(config: Config) {
     next();
   });
 
-  app.post("/mcp", async (request, response) => {
-    const { server, schemas } = createMcpServer(client);
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    const httpDiagnostic = currentDiagnostic()!;
-    response.on("close", () => {
-      const failed = (error: unknown) => inDiagnostic(httpDiagnostic, () => logDiagnostic("mcp.failed", {}, error));
-      void transport.close().catch(failed);
-      void server.close().catch(failed);
+  app.all("/mcp", async (request, response, next) => {
+    if (!["POST", "GET", "DELETE"].includes(request.method)) return next();
+    const sessionId = request.header("Mcp-Session-Id");
+    const retained = sessionId ? sessions.get(sessionId) : undefined;
+    if (sessionId !== undefined && !retained) {
+      response.status(404).json({ error: "Unknown MCP session" });
+      return;
+    }
+    if (!retained && request.method !== "POST") {
+      response.status(400).json({ error: "Mcp-Session-Id is required" });
+      return;
+    }
+    if (retained) {
+      try { await retained.transport.handleRequest(request, response, request.body); }
+      catch (error) { next(error); }
+      return;
+    }
+    const stateful = isInitializeRequest(request.body);
+    const { server, schemas } = createMcpServer(client, enabledEvents?.store);
+    const subscribedUris = new Set<string>();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: stateful ? () => randomUUID() : undefined,
+      onsessioninitialized: (id) => { sessions.set(id, { server, transport, subscribedUris }); },
+    });
+    if (!stateful) response.on("close", () => {
+      void server.close().catch((error: unknown) => logDiagnostic("mcp.failed", {}, error));
     });
     try {
+      if (enabledEvents && stateful) {
+        server.server.registerCapabilities({ resources: { subscribe: true } });
+        server.server.setRequestHandler(SubscribeRequestSchema, ({ params }) => {
+          if (!config.events.organizationIds.some((id) => eventResourceUri(id) === params.uri)) {
+            throw new McpError(ErrorCode.InvalidParams, "Unknown event resource");
+          }
+          subscribedUris.add(params.uri);
+          return {};
+        });
+        server.server.setRequestHandler(UnsubscribeRequestSchema, ({ params }) => {
+          subscribedUris.delete(params.uri);
+          return {};
+        });
+      }
       await server.connect(transport);
+      const onclose = transport.onclose;
+      transport.onclose = () => {
+        if (transport.sessionId) sessions.delete(transport.sessionId);
+        subscribedUris.clear();
+        onclose?.();
+      };
       const receive = transport.onmessage!;
       // Intercept messages only after the transport has checked HTTP headers,
       // protocol version and JSON-RPC envelopes. This also covers each batch item.
       transport.onmessage = (message, extra) => {
-        const diagnostic = Array.isArray(request.body) ? newDiagnostic(httpDiagnostic) : httpDiagnostic;
+        const activeDiagnostic = currentDiagnostic() ?? newDiagnostic();
+        const diagnostic = batchRequests.has(activeDiagnostic) ? newDiagnostic(activeDiagnostic) : activeDiagnostic;
         inDiagnostic(diagnostic, () => {
           const envelope = JSONRPCRequestSchema.safeParse(message);
           const call = CallToolRequestSchema.safeParse(message);
@@ -111,6 +175,7 @@ export function createHttpApp(config: Config) {
       };
       await transport.handleRequest(request, response, request.body);
     } catch (error) {
+      await server.close().catch((closeError: unknown) => logDiagnostic("mcp.failed", {}, closeError));
       logDiagnostic("mcp.failed", {}, error);
       if (!response.headersSent) response.status(500).json({ error: {
         code: "INTERNAL_ERROR", category: "internal", message: "Internal MCP error",
@@ -120,8 +185,8 @@ export function createHttpApp(config: Config) {
   });
 
   app.all("/mcp", (_request, response) => {
-    response.setHeader("Allow", "POST");
-    response.status(405).json({ error: "Use POST for stateless Streamable HTTP MCP" });
+    response.setHeader("Allow", "POST, GET, DELETE");
+    response.status(405).json({ error: "Use POST, GET or DELETE for Streamable HTTP MCP" });
   });
 
   app.use("/mcp", (error: unknown, _request: Request, response: Response, _next: NextFunction) => {

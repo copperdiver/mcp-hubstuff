@@ -1,4 +1,13 @@
+export interface EventConfig {
+  enabled: boolean;
+  organizationIds: number[];
+  statePath: string;
+  retention: number;
+  intervalsMs: { tasks: number; activities: number; timeEdits: number; audit: number };
+}
+
 export interface Config {
+  events: EventConfig;
   port: number;
   mcpAuthToken?: string;
   organizationToken?: string;
@@ -33,9 +42,49 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
   return parsed;
 }
 
+function eventPositiveInteger(value: string | undefined, fallback: number, name: string): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!/^\d+$/.test(value.trim()) || !Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function loadEventConfig(env: NodeJS.ProcessEnv): EventConfig {
+  const enabledValue = env.HUBSTAFF_EVENTS_ENABLED;
+  if (enabledValue !== undefined && enabledValue !== "true" && enabledValue !== "false") {
+    throw new Error("HUBSTAFF_EVENTS_ENABLED must be true or false");
+  }
+  const enabled = enabledValue === "true";
+  const scope = optional(env.HUBSTAFF_EVENT_ORGANIZATION_IDS);
+  const organizationIds = scope === undefined ? [] : scope.split(",").map((id) =>
+    eventPositiveInteger(id, 0, "HUBSTAFF_EVENT_ORGANIZATION_IDS"),
+  );
+  if (enabled && organizationIds.length === 0) {
+    throw new Error("HUBSTAFF_EVENT_ORGANIZATION_IDS is required when events are enabled");
+  }
+  if (new Set(organizationIds).size !== organizationIds.length) {
+    throw new Error("HUBSTAFF_EVENT_ORGANIZATION_IDS must contain unique IDs");
+  }
+  return {
+    enabled,
+    organizationIds,
+    statePath: optional(env.HUBSTAFF_EVENT_STATE_PATH) ?? "/data/events-state.json",
+    retention: eventPositiveInteger(env.HUBSTAFF_EVENT_RETENTION, 1000, "HUBSTAFF_EVENT_RETENTION"),
+    intervalsMs: {
+      tasks: eventPositiveInteger(env.HUBSTAFF_EVENT_TASKS_INTERVAL_MS, 300_000, "HUBSTAFF_EVENT_TASKS_INTERVAL_MS"),
+      activities: eventPositiveInteger(env.HUBSTAFF_EVENT_ACTIVITIES_INTERVAL_MS, 1_200_000, "HUBSTAFF_EVENT_ACTIVITIES_INTERVAL_MS"),
+      timeEdits: eventPositiveInteger(env.HUBSTAFF_EVENT_TIME_EDITS_INTERVAL_MS, 600_000, "HUBSTAFF_EVENT_TIME_EDITS_INTERVAL_MS"),
+      audit: eventPositiveInteger(env.HUBSTAFF_EVENT_AUDIT_INTERVAL_MS, 600_000, "HUBSTAFF_EVENT_AUDIT_INTERVAL_MS"),
+    },
+  };
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const authMode = env.HUBSTAFF_AUTH_MODE === "oauth" ? "oauth" : "pat";
   const config: Config = {
+    events: loadEventConfig(env),
     port: positiveInteger(env.PORT, 3000, "PORT"),
     authMode,
     apiBase: (optional(env.HUBSTAFF_API_BASE) ?? "https://api.hubstaff.com").replace(/\/$/, ""),

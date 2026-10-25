@@ -9,6 +9,44 @@ export { HubstaffApiError } from "./errors.js";
 type QueryValue = string | number | boolean | Array<string | number> | undefined;
 export type Query = Record<string, QueryValue>;
 
+export interface HubstaffResponseMeta {
+  rateLimit?: { limit?: number; remaining?: number; resetAt?: number };
+}
+
+function nonNegativeHeader(value: string | null, multiplier = 1): number | undefined {
+  if (value === null || !/^\d+(?:\.\d+)?$/.test(value.trim())) return undefined;
+  const parsed = Number(value) * multiplier;
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function responseMeta(headers: Headers): HubstaffResponseMeta {
+  const limit = nonNegativeHeader(headers.get("x-rate-limit-limit"));
+  const remaining = nonNegativeHeader(headers.get("x-rate-limit-remaining"));
+  const resetAt = nonNegativeHeader(headers.get("x-rate-limit-reset"), 1000);
+  if (limit === undefined && remaining === undefined && resetAt === undefined) return {};
+  return { rateLimit: {
+    ...(limit !== undefined ? { limit } : {}),
+    ...(remaining !== undefined ? { remaining } : {}),
+    ...(resetAt !== undefined ? { resetAt } : {}),
+  } };
+}
+
+function retryAfterMs(headers: Headers): number | undefined {
+  const value = headers.get("retry-after");
+  const seconds = nonNegativeHeader(value, 1000);
+  if (seconds !== undefined) return seconds;
+  // Date.parse also accepts bare numbers and incomplete dates. Only allow
+  // the three HTTP-date formats before parsing an upstream header.
+  const httpDates = [
+    /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/,
+    /^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), \d{2}-[A-Z][a-z]{2}-\d{2} \d{2}:\d{2}:\d{2} GMT$/,
+    /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) [A-Z][a-z]{2} ( \d|\d{2}) \d{2}:\d{2}:\d{2} \d{4}$/,
+  ];
+  if (value === null || !httpDates.some((format) => format.test(value))) return undefined;
+  const date = Date.parse(value.endsWith(" GMT") ? value : `${value} GMT`);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
+}
+
 interface CachedToken {
   accessToken?: string;
   refreshToken?: string;
@@ -35,8 +73,14 @@ export class HubstaffClient {
   }
 
   async request<T>(method: string, path: string, query?: Query): Promise<T> {
+    return (await this.requestWithMeta<T>(method, path, query)).data;
+  }
+
+  private async requestWithMeta<T>(
+    method: string, path: string, query?: Query,
+  ): Promise<{ data: T; meta: HubstaffResponseMeta }> {
     if (!currentDiagnostic()) {
-      return inDiagnostic(newDiagnostic(), () => this.request<T>(method, path, query));
+      return inDiagnostic(newDiagnostic(), () => this.requestWithMeta<T>(method, path, query));
     }
     const token = await this.getToken();
     const canRefresh = Boolean(this.refreshToken && !this.config.organizationToken);
@@ -45,13 +89,18 @@ export class HubstaffClient {
       logDiagnostic("upstream.retry", { phase: "api", retry_reason: "unauthorized", retry_count: 1 });
       this.expiresAt = 0;
       const refreshed = await this.refresh();
-      return (await this.fetchWithToken<T>(method, path, refreshed, query, 2)).data as T;
+      const replay = await this.fetchWithToken<T>(method, path, refreshed, query, 2);
+      return { data: replay.data as T, meta: replay.meta };
     }
-    return response.data as T;
+    return { data: response.data as T, meta: response.meta };
   }
 
   get<T>(path: string, query?: Query): Promise<T> {
     return this.request<T>("GET", path, query);
+  }
+
+  getWithMeta<T>(path: string, query?: Query): Promise<{ data: T; meta: HubstaffResponseMeta }> {
+    return this.requestWithMeta<T>("GET", path, query);
   }
 
   private async initialize(): Promise<void> {
@@ -136,7 +185,7 @@ export class HubstaffClient {
 
   private fetchWithToken<T>(
     method: string, path: string, token: string, query?: Query, attempt = 1, canRefresh = false,
-  ): Promise<{ status: number; data?: T }> {
+  ): Promise<{ status: number; data?: T; meta: HubstaffResponseMeta }> {
     const url = new URL(path, `${this.config.apiBase}/`);
     for (const [key, value] of Object.entries(query ?? {})) {
       if (value === undefined) continue;
@@ -152,6 +201,7 @@ export class HubstaffClient {
       signal: AbortSignal.timeout(this.config.requestTimeoutMs),
     }, async (response) => ({
       status: response.status,
+      meta: responseMeta(response.headers),
       data: response.status === 401 && canRefresh ? undefined : await this.parseResponse<T>(response),
     }), attempt, query);
   }
@@ -213,7 +263,11 @@ export class HubstaffClient {
   }
 
   private async parseResponse<T>(response: Response): Promise<T> {
-    if (!response.ok) throw new HubstaffApiError(response.status, await this.readBody<string>(response, true));
+    if (!response.ok) {
+      throw new HubstaffApiError(
+        response.status, await this.readBody<string>(response, true), undefined, retryAfterMs(response.headers),
+      );
+    }
     if (response.status === 204) return {} as T;
     return this.readBody<T>(response);
   }

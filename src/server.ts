@@ -32,9 +32,9 @@ function createMcpServer(client: HubstaffClient, events?: EventStore) {
   return { server, schemas };
 }
 
-export function createHttpApp(config: Config, events?: { store: EventStore; monitor: EventMonitor }) {
+export function createHttpApp(config: Config, events?: { store: EventStore; monitor: EventMonitor },
+  client = new HubstaffClient(config)) {
   const app = express();
-  const client = new HubstaffClient(config);
   const sessions = new Map<string, McpSession>();
   const batchRequests = new WeakSet<object>();
   const enabledEvents = config.events.enabled ? events : undefined;

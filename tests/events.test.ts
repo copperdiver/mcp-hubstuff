@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, stat, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile, mkdir, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -25,15 +25,31 @@ function event(record: string, organizationId = 7, type: HubstaffEvent["type"] =
 }
 
 describe("JsonEventStore", () => {
+  it("resumes persistence after a crash leaves a temporary file for the reused PID", async () => {
+    const { store, path } = await temporaryStore();
+    await store.append(event("41"), "one", "one");
+    const leftover = `${path}.${process.pid}.tmp`;
+    await writeFile(leftover, "interrupted private state", { mode: 0o600 });
+    const restored = new JsonEventStore(path, { retention: 2 });
+    await restored.load();
+    await expect(restored.append(event("42"), "two", "two")).resolves.toBe(true);
+    const reloaded = new JsonEventStore(path, { retention: 2 });
+    await reloaded.load();
+    expect(reloaded.list(7).map((item) => item.sourceRecordId)).toEqual(["41", "42"]);
+    expect(await readFile(leftover, "utf8")).toBe("interrupted private state");
+  });
+
   it("commits source progress and event batches atomically, including empty successful polls", async () => {
     const { store, path } = await temporaryStore(10);
     await store.commitSourceBatch("tasks", 7, { "41": { status: "active" } }, "first", []);
     expect(store.getSourceState("tasks", 7)).toEqual({ initialized: true, snapshot: { "41": { status: "active" } }, watermark: "first" });
-    await mkdir(`${path}.${process.pid}.tmp`);
+    await rename(path, `${path}.saved`);
+    await mkdir(path);
     await expect(store.commitSourceBatch("tasks", 7, {}, "second", [{ event: event("42"), dedupeKey: "two" }])).rejects.toThrow();
     expect(store.list(7)).toEqual([]);
     expect(store.getSourceState("tasks", 7)?.watermark).toBe("first");
-    await rm(`${path}.${process.pid}.tmp`, { recursive: true });
+    await rm(path, { recursive: true });
+    await rename(`${path}.saved`, path);
     expect(await store.commitSourceBatch("tasks", 7, {}, "second", [{ event: event("42"), dedupeKey: "two" }])).toBe(1);
     const restored = new JsonEventStore(path, { retention: 10 });
     await restored.load();
@@ -125,7 +141,8 @@ describe("JsonEventStore", () => {
   it("does not publish a failed write or advance its watermark and can recover", async () => {
     const { store, path } = await temporaryStore();
     await store.append(event("41"), "one", "one");
-    await mkdir(`${path}.${process.pid}.tmp`);
+    await rename(path, `${path}.saved`);
+    await mkdir(path);
     await expect(store.append(event("42"), "two", "two")).rejects.toThrow(/^Unable to write event state$/);
     try { await store.append(event("42"), "two", "two"); }
     catch (error) {
@@ -134,10 +151,11 @@ describe("JsonEventStore", () => {
     }
     expect(store.list(7).map((item) => item.sourceRecordId)).toEqual(["41"]);
     expect(store.getSourceState("tasks", 7)?.watermark).toBe("one");
+    await rm(path, { recursive: true });
+    await rename(`${path}.saved`, path);
     const restored = new JsonEventStore(path, { retention: 2 });
     await restored.load();
     expect(restored.list(7).map((item) => item.sourceRecordId)).toEqual(["41"]);
-    await rm(`${path}.${process.pid}.tmp`, { recursive: true });
     expect(await store.append(event("42"), "two", "two")).toBe(true);
   });
 

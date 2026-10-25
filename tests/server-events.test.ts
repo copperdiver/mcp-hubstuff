@@ -115,3 +115,38 @@ it("notifies only the session subscribed to the organization event resource", as
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+it("shares rotated credentials between the polling monitor and MCP tools", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "shared-client-"));
+  const config = loadConfig({ MCP_AUTH_TOKEN: auth, HUBSTAFF_REFRESH_TOKEN: "initial-refresh",
+    TOKEN_CACHE_PATH: join(directory, "tokens.json"),
+    HUBSTAFF_EVENTS_ENABLED: "true", HUBSTAFF_EVENT_ORGANIZATION_IDS: "7" });
+  const store = new JsonEventStore(join(directory, "events.json"), { retention: 100 });
+  const shared = new HubstaffClient(config);
+  const monitor = new EventMonitor(config.events, shared, store);
+  let refreshes = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: URL | string, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      refreshes++;
+      return new Response(JSON.stringify({ access_token: "rotated-access", refresh_token: "rotated-refresh", expires_in: 3600 }));
+    }
+    expect((init?.headers as Record<string, string>).authorization).toBe("Bearer rotated-access");
+    return new Response(JSON.stringify({ tasks: [], task: { id: 42 } }));
+  }));
+  const app = createHttpApp(config, { store, monitor }, shared);
+  try {
+    await store.load();
+    await monitor.runSource(7, "tasks");
+    // The running client's credentials must survive external cache removal.
+    await rm(config.tokenCachePath);
+    const reply = await request(app).post("/mcp").set("Authorization", `Bearer ${auth}`)
+      .set("Accept", "application/json, text/event-stream").send({ jsonrpc: "2.0", id: 2, method: "tools/call",
+        params: { name: "hubstaff_get_task", arguments: { task_id: 42 } } }).expect(200);
+    expect(reply.text).toContain('"id":42');
+    expect(refreshes).toBe(1);
+  } finally {
+    await app.locals.close();
+    vi.unstubAllGlobals();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

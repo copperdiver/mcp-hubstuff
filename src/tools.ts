@@ -206,7 +206,7 @@ export function registerTools(server: McpServer, client: HubstaffClient, events?
       return result(feed(organization_id, after, types, limit));
     });
     server.registerResource("hubstaff_events", new ResourceTemplate("hubstaff://events/{organizationId}", { list: undefined }), {
-      title: "Observed Hubstaff events", description: "The first 50 retained events and source status for an organization.",
+      title: "Observed Hubstaff events", description: "The latest 50 retained events in cursor order and source status for an organization. Use next_cursor with hubstaff_list_events to read subsequent events.",
       mimeType: "application/json", _meta: { securitySchemes: oauthSecurity },
     }, async (_uri, variables) => {
       const id = variables.organizationId;
@@ -215,7 +215,9 @@ export function registerTools(server: McpServer, client: HubstaffClient, events?
       }
       const organizationId = Number(id);
       try {
-        return { contents: [{ uri: eventResourceUri(organizationId), mimeType: "application/json", text: JSON.stringify(feed(organizationId), null, 2) }] };
+        const page = eventStore.list(organizationId).slice(-50);
+        const latest = { events: page, next_cursor: page.at(-1)?.id ?? null, source_status: eventStore.status(organizationId) };
+        return { contents: [{ uri: eventResourceUri(organizationId), mimeType: "application/json", text: JSON.stringify(latest, null, 2) }] };
       } catch {
         throw new McpError(ErrorCode.InternalError, "The server could not read the Hubstaff event feed.");
       }

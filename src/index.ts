@@ -7,13 +7,14 @@ import { EventMonitor } from "./event-monitor.js";
 import { HubstaffClient } from "./hubstaff-client.js";
 
 const config = loadConfig();
+const client = new HubstaffClient(config);
 let events: { store: JsonEventStore; monitor: EventMonitor } | undefined;
 if (config.events.enabled) {
   const store = new JsonEventStore(config.events.statePath, { retention: config.events.retention });
   await store.load();
-  events = { store, monitor: new EventMonitor(config.events, new HubstaffClient(config), store) };
+  events = { store, monitor: new EventMonitor(config.events, client, store) };
 }
-const app = createHttpApp(config, events);
+const app = createHttpApp(config, events, client);
 
 const http = app.listen(config.port, "0.0.0.0", () => {
   logDiagnostic("server.started", { port: config.port });

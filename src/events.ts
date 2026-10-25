@@ -1,4 +1,5 @@
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { z } from "zod";
 
@@ -176,7 +177,7 @@ export class JsonEventStore implements EventStore {
       // Validate the actual JSON representation before it can replace durable state.
       const serialized = JSON.stringify(stateSchema.parse(next));
       const persisted = stateSchema.parse(JSON.parse(serialized));
-      const temporaryPath = `${this.statePath}.${process.pid}.tmp`;
+      const temporaryPath = `${this.statePath}.${process.pid}.${randomUUID()}.tmp`;
       await mkdir(dirname(this.statePath), { recursive: true });
       const file = await open(temporaryPath, "wx", 0o600);
       try {

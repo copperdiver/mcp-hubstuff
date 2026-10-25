@@ -98,6 +98,31 @@ describe("Hubstaff MCP tools", () => {
     });
   });
 
+  it("refreshes the resource with the latest 50 events while preserving tool pagination", async () => {
+    await withEventClient(async (client, store) => {
+      const sample = store.list(7)[0]!;
+      for (let i = 1; i <= 55; i++) {
+        await store.append({ ...sample, sourceRecordId: `new-${i}` }, `new-${i}`, "watermark");
+      }
+      const readFeed = async () => JSON.parse((await client.readResource({ uri: "hubstaff://events/7" })).contents[0]!.text as string);
+      const before = await readFeed();
+      expect(before.events).toHaveLength(50);
+      expect(before.events[0].sourceRecordId).toBe("new-6");
+      expect(before.events.at(-1).sourceRecordId).toBe("new-55");
+      expect(before.next_cursor).toBe(before.events.at(-1).id);
+      await store.append({ ...sample, sourceRecordId: "new-56" }, "new-56", "watermark");
+      const after = await readFeed();
+      expect(after.events[0].sourceRecordId).toBe("new-7");
+      expect(after.events.at(-1).sourceRecordId).toBe("new-56");
+      expect(after.next_cursor > before.next_cursor).toBe(true);
+      expect(JSON.stringify(after)).not.toContain("private upstream snapshot");
+      const next = await client.callTool({ name: "hubstaff_list_events", arguments: { organization_id: 7, after: before.next_cursor } });
+      expect(next.structuredContent?.result).toMatchObject({ events: [expect.objectContaining({ sourceRecordId: "new-56" })], next_cursor: after.next_cursor });
+      const first = await client.callTool({ name: "hubstaff_list_events", arguments: { organization_id: 7, limit: 1 } });
+      expect(first.structuredContent?.result).toMatchObject({ events: [expect.objectContaining({ sourceRecordId: "41" })] });
+    });
+  });
+
   it("rejects invalid event tool arguments and noninteger organization resource URIs", async () => {
     await withEventClient(async (client) => {
       for (const args of [{ organization_id: 0 }, { organization_id: 7.5 }, { organization_id: 7, limit: 0 },

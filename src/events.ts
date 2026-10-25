@@ -35,6 +35,8 @@ export interface EventStore {
   status(organizationId: number): MonitorSourceStatus[];
   setSourceStatus(status: MonitorSourceStatus): Promise<void>;
   getSourceState(source: EventSource, organizationId: number): StoredSourceState | undefined;
+  commitSourceBatch(source: EventSource, organizationId: number, snapshot: unknown, watermark: string,
+    batch: { event: HubstaffEvent; dedupeKey: string }[]): Promise<number>;
 }
 
 const stateSchema = z.object({
@@ -113,6 +115,29 @@ export class JsonEventStore implements EventStore {
       };
       await this.commit(next);
       return true;
+    });
+  }
+
+  /** Publish the source checkpoint and all new events in one durable replacement. */
+  async commitSourceBatch(source: EventSource, organizationId: number, snapshot: unknown, watermark: string,
+    batch: { event: HubstaffEvent; dedupeKey: string }[]): Promise<number> {
+    return this.enqueue(async () => {
+      const next = structuredClone(this.document);
+      let appended = 0;
+      for (const { event, dedupeKey } of batch) {
+        if (event.source !== source || event.organizationId !== organizationId) throw new Error("Invalid event batch");
+        if (next.dedupeKeys.includes(dedupeKey)) continue;
+        if (next.sequence === Number.MAX_SAFE_INTEGER) throw new Error("Event sequence exhausted");
+        const id = (++next.sequence).toString(36).padStart(16, "0");
+        next.events.push(structuredClone({ ...event, id }));
+        next.dedupeKeys.push(dedupeKey);
+        appended++;
+      }
+      next.events = next.events.slice(-this.retention);
+      next.dedupeKeys = next.dedupeKeys.slice(-this.retention);
+      next.sources[key(source, organizationId)] = { initialized: true, snapshot: structuredClone(snapshot), watermark };
+      await this.commit(next);
+      return appended;
     });
   }
 

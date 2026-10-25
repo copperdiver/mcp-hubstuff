@@ -25,6 +25,24 @@ function event(record: string, organizationId = 7, type: HubstaffEvent["type"] =
 }
 
 describe("JsonEventStore", () => {
+  it("commits source progress and event batches atomically, including empty successful polls", async () => {
+    const { store, path } = await temporaryStore(10);
+    await store.commitSourceBatch("tasks", 7, { "41": { status: "active" } }, "first", []);
+    expect(store.getSourceState("tasks", 7)).toEqual({ initialized: true, snapshot: { "41": { status: "active" } }, watermark: "first" });
+    await mkdir(`${path}.${process.pid}.tmp`);
+    await expect(store.commitSourceBatch("tasks", 7, {}, "second", [{ event: event("42"), dedupeKey: "two" }])).rejects.toThrow();
+    expect(store.list(7)).toEqual([]);
+    expect(store.getSourceState("tasks", 7)?.watermark).toBe("first");
+    await rm(`${path}.${process.pid}.tmp`, { recursive: true });
+    expect(await store.commitSourceBatch("tasks", 7, {}, "second", [{ event: event("42"), dedupeKey: "two" }])).toBe(1);
+    const restored = new JsonEventStore(path, { retention: 10 });
+    await restored.load();
+    expect(restored.getSourceState("tasks", 7)).toEqual({ initialized: true, snapshot: {}, watermark: "second" });
+    expect(restored.list(7).map((item) => item.sourceRecordId)).toEqual(["42"]);
+    expect(await restored.commitSourceBatch("tasks", 7, {}, "third", [{ event: event("42"), dedupeKey: "two" }])).toBe(0);
+    expect(restored.getSourceState("tasks", 7)?.watermark).toBe("third");
+  });
+
   it("baselines without output, deduplicates replay, and bounds the retained feed", async () => {
     const { store, path } = await temporaryStore();
     await store.baseline("tasks", 7, { "42": { updated_at: "2026-10-25T09:00:00Z" } });

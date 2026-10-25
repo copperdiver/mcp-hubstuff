@@ -108,11 +108,34 @@ describe("JsonEventStore", () => {
     const { store, path } = await temporaryStore();
     await store.append(event("41"), "one", "one");
     await mkdir(`${path}.${process.pid}.tmp`);
-    await expect(store.append(event("42"), "two", "two")).rejects.toThrow();
+    await expect(store.append(event("42"), "two", "two")).rejects.toThrow(/^Unable to write event state$/);
+    try { await store.append(event("42"), "two", "two"); }
+    catch (error) {
+      expect(String(error)).not.toContain(path);
+      expect((error as Error).cause).toBeUndefined();
+    }
     expect(store.list(7).map((item) => item.sourceRecordId)).toEqual(["41"]);
     expect(store.getSourceState("tasks", 7)?.watermark).toBe("one");
+    const restored = new JsonEventStore(path, { retention: 2 });
+    await restored.load();
+    expect(restored.list(7).map((item) => item.sourceRecordId)).toEqual(["41"]);
     await rm(`${path}.${process.pid}.tmp`, { recursive: true });
     expect(await store.append(event("42"), "two", "two")).toBe(true);
+  });
+
+  it("rejects an undefined baseline without corrupting prior durable state", async () => {
+    const { store, path } = await temporaryStore();
+    await store.baseline("tasks", 7, { "41": { status: "active" } });
+    await store.append(event("41"), "one", "one");
+    const before = await readFile(path, "utf8");
+    await expect(store.baseline("tasks", 7, undefined)).rejects.toThrow();
+    expect(await readFile(path, "utf8")).toBe(before);
+    expect(store.getSourceState("tasks", 7)?.snapshot).toEqual({ "41": { status: "active" } });
+    const restored = new JsonEventStore(path, { retention: 2 });
+    await restored.load();
+    expect(restored.getSourceState("tasks", 7)).toEqual({ initialized: true,
+      snapshot: { "41": { status: "active" } }, watermark: "one" });
+    expect(restored.list(7).map((item) => item.sourceRecordId)).toEqual(["41"]);
   });
 
   it("isolates its state from mutation through caller objects and returned data", async () => {

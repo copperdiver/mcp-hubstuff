@@ -147,21 +147,27 @@ export class JsonEventStore implements EventStore {
   }
 
   private async commit(next: Document): Promise<void> {
-    // Validate before writing; callers must supply normalized payloads and snapshots.
-    const serialized = JSON.stringify(stateSchema.parse(next));
-    const temporaryPath = `${this.statePath}.${process.pid}.tmp`;
-    await mkdir(dirname(this.statePath), { recursive: true });
-    const file = await open(temporaryPath, "wx", 0o600);
     try {
+      // Validate the actual JSON representation before it can replace durable state.
+      const serialized = JSON.stringify(stateSchema.parse(next));
+      const persisted = stateSchema.parse(JSON.parse(serialized));
+      const temporaryPath = `${this.statePath}.${process.pid}.tmp`;
+      await mkdir(dirname(this.statePath), { recursive: true });
+      const file = await open(temporaryPath, "wx", 0o600);
       try {
-        await file.writeFile(serialized, "utf8");
-        await file.sync();
-      } finally { await file.close(); }
-      await rename(temporaryPath, this.statePath);
-    } catch (error) {
-      await unlink(temporaryPath).catch(() => undefined);
-      throw error;
+        try {
+          await file.writeFile(serialized, "utf8");
+          await file.sync();
+        } finally { await file.close(); }
+        await rename(temporaryPath, this.statePath);
+      } catch (error) {
+        await unlink(temporaryPath).catch(() => undefined);
+        throw error;
+      }
+      this.document = persisted;
+    } catch {
+      // Neither filesystem paths nor validation input may reach public diagnostics.
+      throw new Error("Unable to write event state");
     }
-    this.document = JSON.parse(serialized) as Document;
   }
 }

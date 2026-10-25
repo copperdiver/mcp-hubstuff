@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config.js";
-import { HubstaffClient } from "../src/hubstaff-client.js";
+import { HubstaffApiError, HubstaffClient } from "../src/hubstaff-client.js";
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
@@ -48,6 +48,22 @@ describe("HubstaffClient", () => {
     const client = metadataClient({ "retry-after": "12" }, 429);
     await expect(client.getWithMeta("/v2/organizations/7/tasks")).rejects.toMatchObject({
       status: 429, retryAfterMs: 12_000,
+    });
+  });
+
+  it("omits private upstream bodies from metadata-read 429 errors while preserving get errors", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () =>
+      json({ error: "PRIVATE_SENTINEL" }, 429, { "retry-after": "12" })));
+    const client = new HubstaffClient(loadConfig({ HUBSTAFF_ORGANIZATION_TOKEN: "hsoat_example" }));
+
+    const error = await client.getWithMeta("/tasks").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(HubstaffApiError);
+    expect(error).toMatchObject({ status: 429, retryAfterMs: 12_000 });
+    expect((error as HubstaffApiError).body).not.toContain("PRIVATE_SENTINEL");
+    expect(JSON.stringify(error)).not.toContain("PRIVATE_SENTINEL");
+
+    await expect(client.get("/tasks")).rejects.toMatchObject({
+      status: 429, body: '{"error":"PRIVATE_SENTINEL"}', retryAfterMs: 12_000,
     });
   });
 

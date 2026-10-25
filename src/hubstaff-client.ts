@@ -99,8 +99,15 @@ export class HubstaffClient {
     return this.request<T>("GET", path, query);
   }
 
-  getWithMeta<T>(path: string, query?: Query): Promise<{ data: T; meta: HubstaffResponseMeta }> {
-    return this.requestWithMeta<T>("GET", path, query);
+  async getWithMeta<T>(path: string, query?: Query): Promise<{ data: T; meta: HubstaffResponseMeta }> {
+    try {
+      return await this.requestWithMeta<T>("GET", path, query);
+    } catch (error) {
+      if (error instanceof HubstaffApiError && error.status === 429) {
+        throw new HubstaffApiError(error.status, "", undefined, error.retryAfterMs);
+      }
+      throw error;
+    }
   }
 
   private async initialize(): Promise<void> {

@@ -133,16 +133,16 @@ export class EventMonitor {
         }
       }
       const appended = await this.store.commitSourceBatch(source, organizationId, snapshot, observedAt, batch);
-      this.failures.delete(key);
-      this.retryAt.delete(key);
-      if (rateResetAt !== undefined && rateResetAt > this.clock().getTime()) this.retryAt.set(key, rateResetAt);
-      await this.store.setSourceStatus({ source, organizationId, status: "healthy", lastSuccessAt: observedAt,
-        nextPollAt: new Date(Math.max(Date.parse(observedAt) + this.interval(source), rateResetAt ?? 0)).toISOString() });
       if (appended) {
         for (const listener of this.listeners) {
           try { listener(organizationId); } catch { /* A subscriber cannot interrupt other subscribers or polling. */ }
         }
       }
+      this.failures.delete(key);
+      this.retryAt.delete(key);
+      if (rateResetAt !== undefined && rateResetAt > this.clock().getTime()) this.retryAt.set(key, rateResetAt);
+      await this.store.setSourceStatus({ source, organizationId, status: "healthy", lastSuccessAt: observedAt,
+        nextPollAt: new Date(Math.max(Date.parse(observedAt) + this.interval(source), rateResetAt ?? 0)).toISOString() });
     } catch (error) {
       const status = error instanceof HubstaffApiError ? error.status : undefined;
       const forbidden = source === "audit" && status === 403;

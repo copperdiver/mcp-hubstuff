@@ -179,6 +179,37 @@ it("notifies once after a committed batch and isolates listener failures", async
   expect(notified).toEqual([7]);
 });
 
+it("notifies committed events exactly once when a subsequent health write fails", async () => {
+  const { monitor, store, getWithMeta, advance } = await setup();
+  const delivered: string[][] = [];
+  monitor.onEvents((id) => { delivered.push(store.list(id).map((event) => event.sourceRecordId)); });
+  getWithMeta.mockResolvedValueOnce(response("tasks", []))
+    .mockResolvedValue(response("tasks", [{ id: 1 }, { id: 2 }]));
+  await monitor.runSource(7, "tasks");
+  vi.spyOn(store, "setSourceStatus").mockRejectedValueOnce(new Error("health write failed"));
+  await monitor.runSource(7, "tasks");
+  expect(delivered).toEqual([["1", "2"]]);
+  expect(store.status(7)[0]).toMatchObject({ status: "error", lastErrorCode: "internal" });
+  advance(300_000);
+  await monitor.runSource(7, "tasks");
+  expect(delivered).toEqual([["1", "2"]]);
+  expect(store.status(7)[0]).toMatchObject({ status: "healthy" });
+});
+
+it("does not notify when the event batch fails to commit", async () => {
+  const { monitor, store, getWithMeta } = await setup();
+  const delivered: number[] = [];
+  monitor.onEvents((id) => { delivered.push(id); });
+  getWithMeta.mockResolvedValueOnce(response("tasks", []))
+    .mockResolvedValueOnce(response("tasks", [{ id: 1 }]));
+  await monitor.runSource(7, "tasks");
+  vi.spyOn(store, "commitSourceBatch").mockRejectedValueOnce(new Error("batch write failed"));
+  await monitor.runSource(7, "tasks");
+  expect(delivered).toEqual([]);
+  expect(store.list(7)).toEqual([]);
+  expect(store.status(7)[0]).toMatchObject({ status: "error", lastErrorCode: "internal" });
+});
+
 it("backs off transient failures exponentially and resets after success", async () => {
   const { monitor, store, getWithMeta, advance } = await setup();
   getWithMeta.mockRejectedValueOnce(new HubstaffRequestError("network", new Error("secret")))

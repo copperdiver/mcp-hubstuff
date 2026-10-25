@@ -1,4 +1,10 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { JsonEventStore, type EventStore } from "../src/events.js";
 import { describe, expect, it, vi } from "vitest";
 import { HubstaffApiError, type HubstaffClient } from "../src/hubstaff-client.js";
 import { registerTools } from "../src/tools.js";
@@ -24,6 +30,105 @@ function registeredTools(get: ReturnType<typeof vi.fn>) {
 }
 
 describe("Hubstaff MCP tools", () => {
+  async function withEventClient(run: (client: Client, store: EventStore) => Promise<void>, enabled = true) {
+    const directory = await mkdtemp(join(tmpdir(), "hubstaff-tools-events-"));
+    const store = new JsonEventStore(join(directory, "state.json"), { retention: 100 });
+    const server = new McpServer({ name: "event-test", version: "1" });
+    const client = new Client({ name: "event-test", version: "1" });
+    try {
+      await store.load();
+      await store.baseline("tasks", 7, { raw: "private upstream snapshot" });
+      for (const [record, organizationId, type] of [
+        ["41", 7, "task.created"], ["42", 8, "task.updated"], ["43", 7, "task.updated"],
+      ] as const) {
+        await store.append({ id: "ignored", organizationId, source: "tasks", type, sourceRecordId: record,
+          sourceTimestamp: "2026-10-25T09:00:00Z", observedAt: "2026-10-25T09:01:00Z",
+          priority: "normal", summary: `Task ${record} changed`, payload: { taskId: record } }, record, "watermark");
+      }
+      await store.setSourceStatus({ source: "tasks", organizationId: 7, status: "healthy" });
+      registerTools(server, { get: vi.fn() } as unknown as HubstaffClient, enabled ? store : undefined);
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      await run(client, store);
+    } finally {
+      await client.close();
+      await server.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  it("lists selected event types after an exclusive cursor with bounded pagination", async () => {
+    await withEventClient(async (client) => {
+      const first = await client.callTool({ name: "hubstaff_list_events", arguments: { organization_id: 7, limit: 1 } });
+      expect(first.structuredContent?.result).toMatchObject({
+        events: [expect.objectContaining({ id: "0000000000000001", type: "task.created" })],
+        next_cursor: "0000000000000001", source_status: [{ source: "tasks", organizationId: 7, status: "healthy" }],
+      });
+      const selected = await client.callTool({ name: "hubstaff_list_events", arguments: {
+        organization_id: 7, after: "0000000000000001", types: ["task.updated"], limit: 10,
+      } });
+      expect(selected.structuredContent?.result).toMatchObject({
+        events: [expect.objectContaining({ id: "0000000000000003", type: "task.updated" })], next_cursor: "0000000000000003",
+      });
+      const empty = await client.callTool({ name: "hubstaff_list_events", arguments: {
+        organization_id: 7, after: "0000000000000003",
+      } });
+      expect(empty.structuredContent?.result).toMatchObject({ events: [], next_cursor: "0000000000000003" });
+      const tool = (await client.listTools()).tools.find((item) => item.name === "hubstaff_list_events")!;
+      expect(tool.annotations?.readOnlyHint).toBe(true);
+      expect(tool._meta?.securitySchemes).toEqual([{ type: "oauth2", scopes: ["hubstaff.read"] }]);
+      expect(tool.inputSchema.properties?.limit).toMatchObject({ default: 50, minimum: 1, maximum: 100 });
+    });
+  });
+
+  it("reads hubstaff://events/7 as stable JSON feed, cursor, and safe source status", async () => {
+    await withEventClient(async (client) => {
+      const resource = await client.readResource({ uri: "hubstaff://events/7" });
+      expect(resource.contents[0]).toMatchObject({ uri: "hubstaff://events/7", mimeType: "application/json" });
+      const text = (resource.contents[0] as { text: string }).text;
+      expect(JSON.parse(text)).toMatchObject({
+        events: [expect.objectContaining({ sourceRecordId: "41" }), expect.objectContaining({ sourceRecordId: "43" })],
+        next_cursor: "0000000000000003", source_status: [{ source: "tasks", organizationId: 7, status: "healthy" }],
+      });
+      expect(text).not.toContain("private upstream snapshot");
+      expect(await client.readResource({ uri: "hubstaff://events/7" })).toEqual(resource);
+      const empty = await client.readResource({ uri: "hubstaff://events/99" });
+      expect(JSON.parse((empty.contents[0] as { text: string }).text)).toEqual({ events: [], next_cursor: null, source_status: [] });
+    });
+  });
+
+  it("rejects invalid event tool arguments and noninteger organization resource URIs", async () => {
+    await withEventClient(async (client) => {
+      for (const args of [{ organization_id: 0 }, { organization_id: 7.5 }, { organization_id: 7, limit: 0 },
+        { organization_id: 7, limit: 101 }, { organization_id: 7, types: ["unknown"] }, { organization_id: 7, after: "" }]) {
+        const response = await client.callTool({ name: "hubstaff_list_events", arguments: args });
+        expect(response.isError).toBe(true);
+      }
+      for (const id of ["abc", "0", "-1", "7.5", "1e2", "9007199254740992"]) {
+        await expect(client.readResource({ uri: `hubstaff://events/${id}` })).rejects.toThrow();
+      }
+    });
+  });
+
+  it("keeps raw store failures out of public resource errors", async () => {
+    await withEventClient(async (client, store) => {
+      vi.spyOn(store, "list").mockImplementation(() => { throw new Error("private upstream payload token=secret"); });
+      let failure: unknown;
+      try { await client.readResource({ uri: "hubstaff://events/7" }); } catch (error) { failure = error; }
+      expect(String(failure)).toContain("could not read the Hubstaff event feed");
+      expect(String(failure)).not.toContain("token=secret");
+    });
+  });
+
+  it("omits event tool and resource template when monitoring is disabled", async () => {
+    await withEventClient(async (client) => {
+      expect((await client.listTools()).tools.some((tool) => tool.name === "hubstaff_list_events")).toBe(false);
+      expect(client.getServerCapabilities()?.resources).toBeUndefined();
+      await expect(client.readResource({ uri: "hubstaff://events/7" })).rejects.toThrow();
+    }, false);
+  });
+
   it("registers only documented Hubstaff V2 data tools", () => {
     const tools = registeredTools(vi.fn());
 

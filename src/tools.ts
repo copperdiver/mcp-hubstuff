@@ -1,7 +1,9 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { HubstaffApiError, HubstaffClient, nextPageStartId, type Query } from "./hubstaff-client.js";
 import { classifyError, HubstaffRequestError, ToolInputError } from "./errors.js";
+import type { EventStore, HubstaffEventType } from "./events.js";
 import {
   currentDiagnostic, elapsed, inDiagnostic, logDiagnostic, newDiagnostic, setDiagnosticOperation,
 } from "./diagnostics.js";
@@ -155,7 +157,11 @@ async function collectPages(
   return items;
 }
 
-export function registerTools(server: McpServer, client: HubstaffClient): Map<string, z.AnyZodObject> {
+export function eventResourceUri(organizationId: number): string {
+  return `hubstaff://events/${organizationId}`;
+}
+
+export function registerTools(server: McpServer, client: HubstaffClient, events?: EventStore): Map<string, z.AnyZodObject> {
   const schemas = new Map<string, z.AnyZodObject>();
   // Reuse exactly the SDK's advertised schemas for safe HTTP validation errors.
   function registerTool<Shape extends z.ZodRawShape>(
@@ -176,6 +182,43 @@ export function registerTools(server: McpServer, client: HubstaffClient): Map<st
         if (!output.isError) logDiagnostic("tool.completed", { duration_ms: elapsed(diagnostic.started) });
         return output;
       });
+    });
+  }
+
+  if (events) {
+    const eventStore = events;
+    const eventInput = z.object({
+      organization_id: z.number().int().positive().safe(),
+      after: z.string().min(1).optional(),
+      types: z.array(z.enum(["task.created", "task.updated", "activity.changed", "time_edit.created", "audit.created"])).optional(),
+      limit: z.number().int().min(1).max(100).default(50),
+    });
+    function feed(organizationId: number, after?: string, types?: HubstaffEventType[], limit = 50) {
+      const page = eventStore.list(organizationId, after, types, limit);
+      return { events: page, next_cursor: page.at(-1)?.id ?? after ?? null, source_status: eventStore.status(organizationId) };
+    }
+    registerTool("hubstaff_list_events", {
+      title: "List observed Hubstaff events",
+      description: "Reads retained polling events for an organization after an exclusive cursor, with optional event type filters.",
+      inputSchema: eventInput.shape, annotations: readOnly, _meta: { securitySchemes: oauthSecurity },
+    }, async (input) => {
+      const { organization_id, after, types, limit } = eventInput.parse(input);
+      return result(feed(organization_id, after, types, limit));
+    });
+    server.registerResource("hubstaff_events", new ResourceTemplate("hubstaff://events/{organizationId}", { list: undefined }), {
+      title: "Observed Hubstaff events", description: "The first 50 retained events and source status for an organization.",
+      mimeType: "application/json", _meta: { securitySchemes: oauthSecurity },
+    }, async (_uri, variables) => {
+      const id = variables.organizationId;
+      if (typeof id !== "string" || !/^[1-9]\d*$/.test(id) || !Number.isSafeInteger(Number(id))) {
+        throw new McpError(ErrorCode.InvalidParams, "organizationId must be a positive safe integer.");
+      }
+      const organizationId = Number(id);
+      try {
+        return { contents: [{ uri: eventResourceUri(organizationId), mimeType: "application/json", text: JSON.stringify(feed(organizationId), null, 2) }] };
+      } catch {
+        throw new McpError(ErrorCode.InternalError, "The server could not read the Hubstaff event feed.");
+      }
     });
   }
 

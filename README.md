@@ -363,6 +363,72 @@ Two files must survive container recreation:
 
 The included Compose configuration mounts a named volume at `/data`.
 
+## Optional polling events
+
+Polling is disabled by default. Enable it only for an explicit set of organizations:
+
+```dotenv
+HUBSTAFF_EVENTS_ENABLED=true
+HUBSTAFF_EVENT_ORGANIZATION_IDS=7,8
+HUBSTAFF_EVENT_STATE_PATH=/data/events-state.json
+HUBSTAFF_EVENT_RETENTION=1000
+HUBSTAFF_EVENT_TASKS_INTERVAL_MS=300000
+HUBSTAFF_EVENT_ACTIVITIES_INTERVAL_MS=1200000
+HUBSTAFF_EVENT_TIME_EDITS_INTERVAL_MS=600000
+HUBSTAFF_EVENT_AUDIT_INTERVAL_MS=600000
+```
+
+These are the defaults except for the required organization IDs and opt-in flag.
+IDs must be unique positive integers; retention and intervals must be positive
+integers. Keep `/data` persistent: event state contains the retained feed, source
+baselines, cursors, deduplication state, and source health. Use one server process
+per state file. State is loaded before polling starts. SIGINT/SIGTERM stop timers
+and close MCP sessions before closing HTTP.
+
+| Source | Default interval | Detected changes |
+|---|---|---|
+| Tasks | 5 minutes | Newly observed tasks and changes to tracked task fields |
+| Activities updates | 20 minutes | One aggregate activity-change event per poll |
+| Time edit logs | 10 minutes | New time edits |
+| Audit log entries | 10 minutes | New audit records |
+
+The first successful poll establishes a baseline without emitting historical
+events. Subsequent window queries overlap by two minutes and span at most seven
+days; a long outage can leave a gap beyond that window. Task polling compares
+snapshots, so intermediate changes between polls can be missed. Events exclude
+task comments and messages. Audit requires Enterprise and an Owner or Organization
+Manager with permission to view others' data; audit 403 marks the source
+unavailable until the monitor is recreated.
+
+[Activities updates](https://developer.hubstaff.com/reference/activities/) may lag
+by up to 20 minutes, allow seven-day queries, and reach back 45 days; ordinary
+activity history reaches back six months. This monitor does not backfill that
+history. [API rate limits](https://developer.hubstaff.com/pagination-rate-limits/)
+default to 120 requests per minute per token, with lower limits for activities
+and other heavy endpoints. Budget for all configured organizations and interactive
+tools. The monitor honors `Retry-After` on 429, delays subsequent polls when rate
+headers report exhaustion, and backs off transient failures. It does not impose
+a global request scheduler; pages and concurrent sources can still reach limits.
+
+For notifications, initialize an authenticated Streamable HTTP session, preserve
+`Mcp-Session-Id` on subsequent POST/GET/DELETE requests, open the GET event stream,
+and explicitly call `resources/subscribe` with `hubstaff://events/{organizationId}`.
+Only that session receives `notifications/resources/updated` for that exact URI.
+The notification contains the URI alone; read the resource or call
+`hubstaff_list_events` with `organization_id`, optional `after` cursor, `types`,
+and `limit` to retrieve events. `resources/unsubscribe` stops delivery; DELETE
+terminates the session and removes subscriptions. Session IDs are process-local;
+reinitialize and resubscribe after restart. Unknown IDs return 404 and every
+request still requires authentication.
+
+For clients without notification support, periodically call `hubstaff_list_events`
+and retain its `next_cursor`. Retention bounds the feed, so slow consumers may
+miss older events. Legacy POST tool calls without initialization remain supported
+as ephemeral stateless requests; they cannot subscribe or receive notifications.
+With monitoring disabled there are no monitor timers, event tools/resources, or
+notification listeners; ordinary tools continue to work. Polling only reads the
+Hubstaff API and performs no Hubstaff writes or webhook registration.
+
 ## Security
 
 - All MCP tools are read-only.

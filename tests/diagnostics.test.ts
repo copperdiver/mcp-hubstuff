@@ -80,6 +80,27 @@ function expectSafeDiagnostic(result: any, response: any, category: string, code
 }
 
 describe("safe MCP diagnostics", () => {
+  it("uses the current HTTP diagnostic context for successive retained-session tool calls", async () => {
+    const app = createHttpApp(config());
+    const post = () => request(app).post("/mcp").set("Authorization", `Bearer ${auth}`)
+      .set("Accept", "application/json, text/event-stream");
+    const initialized = await post().send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" },
+    } }).expect(200);
+    const sessionId = initialized.headers["mcp-session-id"];
+    try {
+      for (const id of [2, 3]) {
+        const response = await post().set("Mcp-Session-Id", sessionId).send({ jsonrpc: "2.0", id,
+          method: "tools/call", params: { name: "hubstaff_list_tasks", arguments: { organization_id: 7, max_items: 5000 } },
+        }).expect(200);
+        const result = rpcMessages(response)[0].result;
+        expectSafeDiagnostic(result, response, "validation", "INVALID_ARGUMENT");
+        expect(response.headers["x-diagnostic-id"]).not.toBe(initialized.headers["x-diagnostic-id"]);
+        // Each assertion above must inspect this request's log, not the previous call.
+        stdout.mockClear(); stderr.mockClear();
+      }
+    } finally { await app.locals.close(); }
+  });
   it("rejects max_items=5000 as validation before contacting Hubstaff", async () => {
     const { result, response } = await callTool(undefined, {
       organization_id: 405914, max_items: 5000, Authorization: secret,
